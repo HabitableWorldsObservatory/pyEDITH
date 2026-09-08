@@ -12,29 +12,8 @@ _A schematic of the `pyEDITH` components and their relationships, and the data f
 
 # How to cite
 
-If you want to use `pyEDITH`, please cite [Alei et al. 2025](https://ui.adsabs.harvard.edu/abs/2025arXiv251205279A/abstract) for the time being. A publication focused on  `pyEDITH` will be available mid-2026.
-<!-- the relevant [JOSS paper](DUMMY LINK). Since this is a paper with two equal-contribution first authors, we recommend the usage of the following notations:
+If you want to use `pyEDITH`, please cite [Alei, Currie et al. 2026](https://ui.adsabs.harvard.edu/abs/2026arXiv260828477A/abstract).
 
-
-```
-\bibitem{pyedith}
-Alei, E. and Currie, M. H. et al. (2025),.....
-```
-
-
-```
-@article{key,
-  author = {Alei, E.{\textsuperscript{*}} and Currie. M. H.{\textsuperscript{*}} and Christopher C. Stark and Aki Roberge and Avi M. Mandell},
-  title = {Title of the Article},
-  journal = {Journal Name},
-  year = {Year},
-  volume = {Volume},
-  number = {Number},
-  pages = {Pages},
-  doi = {DOI},
-  note = {{\textsuperscript{*}}These authors contributed equally to this work.}
-}
-``` -->
 
 
 ```{toctree}
