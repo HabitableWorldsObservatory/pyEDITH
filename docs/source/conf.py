@@ -95,7 +95,9 @@ def setup(app):
     tutorials_src = source_dir / "../../tutorials"
 
     # Copy specific notebooks directly to source folder
-    notebooks_to_copy = ["imaging_tutorial.ipynb", "spectroscopy_tutorial.ipynb"]
+    notebooks_to_copy = ["imaging_tutorial.ipynb",
+                         "spectroscopy_tutorial.ipynb",
+                         "exoearth_spectroscopy_tutorial.ipynb"]
 
     for notebook in notebooks_to_copy:
         src = tutorials_src / notebook

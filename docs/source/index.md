@@ -24,6 +24,7 @@ installation
 run_pyedith
 imaging_tutorial
 spectroscopy_tutorial
+exoearth_spectroscopy_tutorial
 yippy_guide
 glossary
 validation
