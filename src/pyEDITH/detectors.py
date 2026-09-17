@@ -252,13 +252,14 @@ class EACDetector(Detector):
 
     def load_configuration(self, parameters: dict, mediator: object) -> None:
         """
-        Load configuration parameters from the YAML files using EACy.
+        Load configuration parameters from unified EAC configuration.
 
-        This method initializes detector attributes using parameters from EAC YAML
-        detector configuration files. It handles both IMAGER and IFS observing modes,
-        loading appropriate detector characteristics including dark current, read noise,
-        and quantum efficiency. The method automatically selects VIS or NIR detector
-        parameters based on the observing wavelength.
+        This method initializes detector attributes using the unified configuration
+        from the Observatory (which handles hwome/eacy loading). It handles both
+        IMAGER and IFS observing modes, loading appropriate detector characteristics
+        including dark current, read noise, and quantum efficiency. The method
+        automatically selects VIS or NIR detector parameters based on the observing
+        wavelength.
 
         Parameters
         ----------
@@ -278,86 +279,54 @@ class EACDetector(Detector):
         """
         parameters = parse_input.parse_parameters(parameters)
 
-        from eacy import load_detector
+        # Get unified EAC configuration from observatory
+        eac_config = mediator.get_eac_configuration()
 
-        # ****** Update Default Config when necessary ******
-
-        raw_detector_params = load_detector(
-            mediator.get_observation_parameter("observing_mode")
-        ).__dict__
-
-        if mediator.get_observation_parameter("observing_mode") == "IMAGER":
-
-            detector_params = utils.average_over_bandpass(
-                raw_detector_params,
-                mediator.get_observation_parameter("wavelength_range"),
+        # For EAC detectors, configuration must be available
+        if self.keyword.startswith("EAC") and eac_config is None:
+            raise RuntimeError(
+                f"Failed to load EAC configuration for {self.keyword}. "
+                f"Cannot proceed with detector initialization."
             )
 
-        elif mediator.get_observation_parameter("observing_mode") == "IFS":
-            detector_params = utils.interpolate_over_bandpass(
-                raw_detector_params, mediator.get_observation_parameter("wavelength")
-            )
+        if eac_config is not None:
+            # **** LOAD FROM UNIFIED EAC CONFIGURATION ****
+            obs_mode = mediator.get_observation_parameter("observing_mode")
+            mode_config = eac_config[obs_mode]
 
-        # scalar values projected to an array of length nlambda
-        dc_arr = np.empty_like(mediator.get_observation_parameter("wavelength").value)
-        dc_arr[mediator.get_observation_parameter("wavelength") < 1 * WAVELENGTH] = (
-            detector_params["dc_vis"]
-        )
-        dc_arr[mediator.get_observation_parameter("wavelength") >= 1 * WAVELENGTH] = (
-            detector_params["dc_nir"]
-        )
-        self.DEFAULT_CONFIG["DC"] = (
-            dc_arr * DARK_CURRENT
-        )  # Dark current (counts pix^-1 s^-1, nlambda array)
+            # Use only the single active channel's data -- no cross-channel merging,
+            # no VIS/NIR string-matching, no bug-prone [0]-indexing into tuples.
+            active_channel = mediator.get_active_channel()
 
-        # Dark current (counts pix^-1 s^-1, nlambda array)
+            if active_channel is not None and active_channel in mode_config["qe"]:
+                # REMINDER: These values are already binned at the right wavelength
+                # points because we ran rebin_channel_curves_to_grid
+                self.DEFAULT_CONFIG["QE"] = (
+                    np.asarray(mode_config["qe"][active_channel]) * QUANTUM_EFFICIENCY
+                )
 
-        rn_arr = np.empty_like(mediator.get_observation_parameter("wavelength").value)
-        rn_arr[mediator.get_observation_parameter("wavelength") < 1 * WAVELENGTH] = (
-            detector_params["rn_vis"]
-        )
-        rn_arr[mediator.get_observation_parameter("wavelength") >= 1 * WAVELENGTH] = (
-            detector_params["rn_nir"]
-        )
-        self.DEFAULT_CONFIG["RN"] = rn_arr * READ_NOISE
+                self.DEFAULT_CONFIG["dQE"] = (
+                    np.asarray(mode_config["dqe"][active_channel]) * DIMENSIONLESS
+                )
 
-        # array values binned at wavelength points must just be stacked
-        # combine the vis and nir qe arrays into a single array.
-        qe_arr = np.empty_like(mediator.get_observation_parameter("wavelength").value)
-        if parameters["observing_mode"] == "IMAGER":
-            qe_arr[
-                mediator.get_observation_parameter("wavelength") < 1 * WAVELENGTH
-            ] = detector_params["qe_vis"]
-            qe_arr[
-                mediator.get_observation_parameter("wavelength") >= 1 * WAVELENGTH
-            ] = detector_params["qe_nir"]
-        elif parameters["observing_mode"] == "IFS":
-            qe_arr[
-                mediator.get_observation_parameter("wavelength") < 1 * WAVELENGTH
-            ] = detector_params["qe_vis"][
-                mediator.get_observation_parameter("wavelength") < 1 * WAVELENGTH
-            ]
-            qe_arr[
-                mediator.get_observation_parameter("wavelength") >= 1 * WAVELENGTH
-            ] = detector_params["qe_nir"][
-                mediator.get_observation_parameter("wavelength") >= 1 * WAVELENGTH
-            ]
-            # if qe_arr contains NaNs, then likely the wavelength range is outside of the qe range.
-            # set the NaN values to zero
-            qe_arr = np.nan_to_num(qe_arr)
-            # make sure qe_arr does not contain NaNs
-            assert ~np.isnan(np.sum(qe_arr)), "QE array contains NaN values"
+                # Double checking length:
+                for key in ["QE", "dQE"]:
+                    assert len(self.DEFAULT_CONFIG[key]) == len(
+                        mediator.get_observation_parameter("wavelength")
+                    ), f"{key} array length does not match observation wavelength grid after rebinning."
 
-        self.DEFAULT_CONFIG["QE"] = qe_arr * QUANTUM_EFFICIENCY
+                self.DEFAULT_CONFIG["DC"] = [
+                    mode_config["dc"][active_channel]
+                ] * DARK_CURRENT
+                self.DEFAULT_CONFIG["RN"] = [
+                    mode_config["rn"][active_channel]
+                ] * READ_NOISE
+                self.DEFAULT_CONFIG["CIC"] = (
+                    mode_config["cic"][active_channel] * CLOCK_INDUCED_CHARGE
+                )
 
-        dQE_arr = np.empty_like(mediator.get_observation_parameter("wavelength").value)
-
-        # for now, hardcoded to 0.75 TODO change
-        dQE_arr.fill(0.75)
-        self.DEFAULT_CONFIG["dQE"] = dQE_arr * DIMENSIONLESS
-        # self.DEFAULT_CONFIG["dQE"] = [
-        #     0.75
-        # ] * DIMENSIONLESS  # Effective QE due to degradation, cosmic ray effects, readout inefficiencies ## TO ADD TO YAML
+            else:
+                raise RuntimeError("Could not parse detector specs.")
 
         # Calculate default detector pixel scale based on telescope
         self.DEFAULT_CONFIG["pixscale_mas"] = (
@@ -369,8 +338,6 @@ class EACDetector(Detector):
             )
         ).to(MAS)
 
-        # fill in tread and CIC to match the length of the wavelength array
-        # TODO read from YAML files
         self.DEFAULT_CONFIG["tread"] = (
             np.full_like(
                 mediator.get_observation_parameter("wavelength").value,
@@ -379,14 +346,7 @@ class EACDetector(Detector):
             )
             * READ_TIME
         )
-        self.DEFAULT_CONFIG["CIC"] = (
-            np.full_like(
-                mediator.get_observation_parameter("wavelength").value,
-                self.DEFAULT_CONFIG["CIC"][0].value,
-                dtype=np.float64,
-            )
-            * CLOCK_INDUCED_CHARGE
-        )
+
         # Load parameters, use defaults if not provided
         utils.fill_parameters(
             self,

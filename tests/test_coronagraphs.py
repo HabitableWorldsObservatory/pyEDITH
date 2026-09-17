@@ -40,6 +40,15 @@ class MockMediator_IMAGER:
         else:
             return 1.0
 
+    def get_telescope_parameter(self, param):
+        if param == "diameter":
+            return 8.0 * LENGTH
+        return 1.0
+
+    def get_eac_configuration(self):
+        # Return None - tests use ToyModel or direct YIP files
+        return None
+
 
 class MockMediator_IFS:
     def get_observation_parameter(self, param):
@@ -57,6 +66,15 @@ class MockMediator_IFS:
             return 1e-3 * ARCSEC
         else:
             return 1.0
+
+    def get_telescope_parameter(self, param):
+        if param == "diameter":
+            return 8.0 * LENGTH
+        return 1.0
+
+    def get_eac_configuration(self):
+        # Return None - tests use ToyModel or direct YIP files
+        return None
 
 
 @pytest.fixture
@@ -737,7 +755,9 @@ def test_coronagraph_yip_load_configuration_imager_basic_parameters(
     assert np.all(coronagraph.skytrans == yippy_coronagraph.sky_trans() * DIMENSIONLESS)
 
     assert len(coronagraph.coronagraph_optical_throughput) == 1
-    assert np.isclose(coronagraph.coronagraph_optical_throughput.value, 0.394770896)
+    # With centralized config loading, YIP-only tests use hardcoded default (0.44)
+    # rather than calling eacy. EAC tests will use the actual loaded value.
+    assert np.isclose(coronagraph.coronagraph_optical_throughput.value, 0.44)
 
 
 @patch("eacy.load_instrument")

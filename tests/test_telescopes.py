@@ -39,6 +39,10 @@ class MockMediator:
             return self.observing_mode
         return 1.0
 
+    def get_eac_configuration(self):
+        # Return None - tests use ToyModel
+        return None
+
 
 @pytest.fixture
 def mock_telescope_params():

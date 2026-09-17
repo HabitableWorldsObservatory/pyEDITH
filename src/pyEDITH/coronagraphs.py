@@ -150,8 +150,8 @@ class Coronagraph(ABC):
         Number of PSF ratios.
     nrolls : int
         Number of roll angles.
-    coronagraph_optical_throughput: np.ndarray
-        Throughput for all coronagraph optics in the optical path
+    # coronagraph_optical_throughput: np.ndarray
+    #     Throughput for all coronagraph optics in the optical path
     """
 
     # Keys that a user is NOT allowed to override for this coronagraph mode.
@@ -199,7 +199,7 @@ class Coronagraph(ABC):
             "coronagraph_bandwidth": float,
             "npsfratios": int,
             "nrolls": int,
-            "coronagraph_optical_throughput": DIMENSIONLESS,
+            # "coronagraph_optical_throughput": DIMENSIONLESS,
             "coronagraph_spectral_resolution": DIMENSIONLESS,
         }
 
@@ -249,11 +249,10 @@ class ToyModelCoronagraph(Coronagraph):
         "photometric_aperture_radius": 0.85 * LAMBDA_D,
         "Tcore": 0.2968371
         * DIMENSIONLESS,  # core throughput of coronagraph (uniform over dark hole, unitless, scalar)
-        "TLyot": 0.65
-        * DIMENSIONLESS,  # Lyot transmission of the coronagraph and the factor of 1.6 is just an estimate, used for skytrans
+        "TLyot": 0.65 * DIMENSIONLESS,  # Lyot transmission of the coronagraph
         "nrolls": 1,  # number of rolls
-        "coronagraph_optical_throughput": [0.44]
-        * DIMENSIONLESS,  # Coronagraph throughput [made up from EAC1-ish]
+        # "coronagraph_optical_throughput": [0.44]
+        # * DIMENSIONLESS,  # Coronagraph throughput [made up from EAC1-ish]
         "coronagraph_spectral_resolution": 1
         * DIMENSIONLESS,  # Set to default. It is used to limit the bandwidth if the coronagraph has a specific spectral window.
     }
@@ -292,9 +291,9 @@ class ToyModelCoronagraph(Coronagraph):
             self, parameters, self.DEFAULT_CONFIG, locked_keys=self.LOCKED_KEYS
         )
 
-        # Convert to numpy array when appropriate
-        array_params = ["coronagraph_optical_throughput"]
-        utils.convert_to_numpy_array(self, array_params)
+        # # Convert to numpy array when appropriate
+        # array_params = ["coronagraph_optical_throughput"]
+        # utils.convert_to_numpy_array(self, array_params)
 
         # Derived parameters
         self.npsfratios = 1
@@ -428,7 +427,6 @@ class CoronagraphYIP(Coronagraph):
         "nrolls": 1,  # number of rolls
         "Tcore": 0.2968371
         * DIMENSIONLESS,  # core throughput within off-axis PSF (only used with photometric_aperture_radius method of calculating Omega)
-        "coronagraph_optical_throughput": None,
         "coronagraph_spectral_resolution": 1
         * DIMENSIONLESS,  # Set to default. It is used to limit the bandwidth if the coronagraph has a specific spectral window.
         "az_avg": True,  # azimuthally average the contrast maps and noise floor if True
@@ -480,33 +478,6 @@ class CoronagraphYIP(Coronagraph):
             If stellar angular diameter is outside valid bounds (0 <= diameter < 1 λ/D)
         """
         parameters = parse_input.parse_parameters(parameters)
-
-        from eacy import load_instrument, load_telescope
-
-        # ***** Load the YAML using EACy *****
-        instrument_params = load_instrument("CI").__dict__
-
-        # averaging over bandpass is only required for imaging mode.
-        if mediator.get_observation_parameter("observing_mode") == "IMAGER":
-
-            instrument_params = utils.average_over_bandpass(
-                instrument_params,
-                mediator.get_observation_parameter("wavelength_range"),
-            )
-        else:  # IFS case
-            instrument_params = utils.interpolate_over_bandpass(
-                instrument_params, mediator.get_observation_parameter("wavelength")
-            )
-
-        # Ensure coronagraph_optical_throughput has dimensions nlambda
-        if np.isscalar(instrument_params["total_inst_refl"]):
-            self.DEFAULT_CONFIG["coronagraph_optical_throughput"] = (
-                np.array([instrument_params["total_inst_refl"]]) * DIMENSIONLESS
-            )
-        else:
-            self.DEFAULT_CONFIG["coronagraph_optical_throughput"] = (
-                np.array(instrument_params["total_inst_refl"]) * DIMENSIONLESS
-            )
 
         # Load photometric aperture radius or psf truncation ratio from user. Fail if not provided
         psf_trunc = parameters.get("psf_trunc_ratio")
@@ -661,9 +632,7 @@ class CoronagraphYIP(Coronagraph):
         )
         lam = mediator.get_observation_parameter("wavelength")
 
-        # TODO how to behave when tele_diam has been overwritten by the user?
-        telescope_params = load_telescope("EAC1").__dict__
-        tele_diam = telescope_params["diam_circ"] * LENGTH
+        tele_diam = mediator.get_telescope_parameter("diameter")
 
         # TODO use lam (observing wavelength range) to calculate the lod value.
         # This implies increasing dimensionality of related parameters.

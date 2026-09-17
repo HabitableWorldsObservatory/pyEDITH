@@ -60,6 +60,10 @@ class MockMediator:
             return 0.2
         return 1.0
 
+    def get_eac_configuration(self):
+        # Return None - tests use ToyModel
+        return None
+
 
 @pytest.fixture
 def mock_instrument():

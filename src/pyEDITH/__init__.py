@@ -90,6 +90,7 @@ def set_verbosity(level="warning"):
 
     # Set pyEDITH logger level
     pyedith_logger.setLevel(log_level)
+    pyedith_logger.propagate = False
     pyedith_logger.info(f"Logging level set to: {logging.getLevelName(log_level)}")
 
     # Set yippy logger level AND its handlers

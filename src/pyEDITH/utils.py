@@ -935,3 +935,86 @@ def resample_to_wavelength_grid(
     if unit is not None:
         return result * unit
     return result
+
+
+def rebin_channel_curves_to_grid(
+    mode_config: dict,
+    active_channel: str,
+    curve_keys: list,
+    to_wavelength: np.ndarray,
+    to_delta_wavelength: np.ndarray = None,
+    interpolation: str = "1d",
+) -> None:
+    """
+    Rebin channel-native engineering curves onto the resolved observation
+    wavelength grid, once, in place.
+
+    For each key in ``curve_keys``, ``mode_config[key][active_channel]`` is
+    expected to be either:
+      - a dict ``{"wavelength": [...], <value_key>: [...]}`` on its own
+        native (typically much higher-resolution) grid -- this gets sorted,
+        deduplicated, and rebinned, then replaced by a plain array; or
+      - already a plain scalar/array (e.g. current single-float dc/rn/cic) --
+        left untouched, since there's nothing to regrid.
+
+    Parameters
+    ----------
+    mode_config : dict
+        The observing-mode sub-dictionary of the unified EAC configuration,
+        i.e. ``self.configuration[obs_mode]``.
+    active_channel : str
+        The channel selected by ``_select_active_channel``.
+    curve_keys : list of str
+        Which top-level keys to rebin (e.g. ``["qe"]``, later
+        ``["qe", "dc", "rn", "cic"]``).
+    to_wavelength : np.ndarray
+        Target wavelength grid, plain array (e.g. ``observation.wavelength.value``).
+    to_delta_wavelength : np.ndarray, optional
+        Bin widths of the target grid; required only for Gaussian interpolation.
+    interpolation : str
+        "1d" or "Gaussian", passed through to ``resample_to_wavelength_grid``.
+    """
+    for key in curve_keys:
+        if key not in mode_config or active_channel not in mode_config[key]:
+            logger.debug(f"{key} was not found in YAML files. Skipping...")
+            continue  # key was not found
+
+        chan_data = mode_config[key][active_channel]
+
+        # Already a plain scalar/array (nothing to regrid) -- skip.
+        if not isinstance(chan_data, dict):
+            logger.debug(
+                f"{key} is a scalar and cannot be rebinned to wavelength grid. Skipping..."
+            )
+            continue
+
+        wavelengths = np.asarray(chan_data["wavelength"], dtype=np.float64)
+        value_key = next(k for k in chan_data if k != "wavelength")
+        values = np.asarray(chan_data[value_key], dtype=np.float64)
+
+        if wavelengths.size > 1:
+            sorted_idx = np.argsort(wavelengths)
+            wavelengths = wavelengths[sorted_idx]
+            values = values[sorted_idx]
+            unique_idx = np.concatenate(([True], wavelengths[1:] != wavelengths[:-1]))
+            wavelengths = wavelengths[unique_idx]
+            values = values[unique_idx]
+
+        rebinned = resample_to_wavelength_grid(
+            values,
+            from_wavelength=(wavelengths * u.um).to(
+                WAVELENGTH
+            ),  # in case wavelength ever changes units
+            to_wavelength=to_wavelength,
+            to_delta_wavelength=to_delta_wavelength,
+            name=f"{key}[{active_channel}]",
+            interpolation=interpolation,
+        )
+
+        logger.debug(
+            f"Rebinned '{key}' for channel '{active_channel}' from "
+            f"{wavelengths.size} native points to {len(to_wavelength)} "
+            f"grid points."
+        )
+
+        mode_config[key][active_channel] = rebinned

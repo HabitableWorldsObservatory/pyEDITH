@@ -46,8 +46,9 @@ class Filter:
             Center wavelength
         bandwidth : float, optional
             Fractional bandwidth (e.g., 0.2 for 20%)
-        resolution : float
+        resolution : float, optional
             Spectral resolution R = λ/Δλ
+
         """
         if name is not None:
             self.name = name
