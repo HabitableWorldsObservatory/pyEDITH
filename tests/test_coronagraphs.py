@@ -235,7 +235,6 @@ def test_toy_model_load_configuration_basic_parameters(
         assert coronagraph.Tcore == 0.3 * DIMENSIONLESS
         assert coronagraph.TLyot == 0.7 * DIMENSIONLESS
         assert coronagraph.nrolls == 1
-        assert coronagraph.coronagraph_optical_throughput == [0.44] * DIMENSIONLESS
         assert coronagraph.coronagraph_spectral_resolution == 1 * DIMENSIONLESS
         assert hasattr(coronagraph, "npsfratios")
         assert hasattr(coronagraph, "npix")
@@ -372,7 +371,6 @@ def test_toy_model_load_configuration_ifs_basic_parameters(
         assert coronagraph.Tcore == 0.3 * DIMENSIONLESS
         assert coronagraph.TLyot == 0.7 * DIMENSIONLESS
         assert coronagraph.nrolls == 1
-        assert coronagraph.coronagraph_optical_throughput == [0.44] * DIMENSIONLESS
         assert coronagraph.coronagraph_spectral_resolution == 1 * DIMENSIONLESS
 
         # --- Attributes exist ---
@@ -754,11 +752,6 @@ def test_coronagraph_yip_load_configuration_imager_basic_parameters(
     assert coronagraph.noisefloor.unit == DIMENSIONLESS
     assert np.all(coronagraph.skytrans == yippy_coronagraph.sky_trans() * DIMENSIONLESS)
 
-    assert len(coronagraph.coronagraph_optical_throughput) == 1
-    # With centralized config loading, YIP-only tests use hardcoded default (0.44)
-    # rather than calling eacy. EAC tests will use the actual loaded value.
-    assert np.isclose(coronagraph.coronagraph_optical_throughput.value, 0.44)
-
 
 @patch("eacy.load_instrument")
 @patch("eacy.load_telescope")
@@ -996,12 +989,6 @@ def test_coronagraph_yip_load_configuration_ifs_basic_parameters(
     assert coronagraph.omega_lod.unit == LAMBDA_D**2
     assert coronagraph.noisefloor.unit == DIMENSIONLESS
     assert np.all(coronagraph.skytrans == yippy_coronagraph.sky_trans() * DIMENSIONLESS)
-
-    assert len(coronagraph.coronagraph_optical_throughput) == 3
-    assert np.isclose(
-        coronagraph.coronagraph_optical_throughput.value,
-        [0.41891199, 0.43711322, 0.40535648],
-    ).all()
 
 
 @patch("eacy.load_instrument")
@@ -1331,7 +1318,6 @@ def valid_coronagraph():
     coronagraph.coronagraph_bandwidth = 0.1
     coronagraph.npsfratios = 1
     coronagraph.nrolls = 1
-    coronagraph.coronagraph_optical_throughput = np.array([0.5]) * DIMENSIONLESS
     coronagraph.coronagraph_spectral_resolution = 1 * DIMENSIONLESS
     return coronagraph
 

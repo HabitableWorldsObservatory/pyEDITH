@@ -1,12 +1,8 @@
 import pytest
 import numpy as np
 from astropy import units as u
-from unittest.mock import patch, MagicMock
 from pyEDITH.telescopes import ToyModelTelescope, EACTelescope
 from pyEDITH.units import LENGTH, TIME, DIMENSIONLESS, TEMPERATURE, WAVELENGTH
-from pyEDITH.utils import average_over_bandpass, interpolate_over_bandpass
-from pyEDITH.filters import Filter
-from copy import deepcopy
 
 # ============================================================================
 # Mock Objects and Fixtures
@@ -16,8 +12,10 @@ from copy import deepcopy
 class MockMediator:
     """Mock mediator for testing telescope configurations."""
 
-    def __init__(self, observing_mode="IMAGER"):
+    def __init__(self, observing_mode="IMAGER", eac_config=None, active_channel=None):
         self.observing_mode = observing_mode
+        self.eac_config = eac_config
+        self.active_channel = active_channel
 
     def get_observation_parameter(self, param):
         if param == "wavelength":
@@ -40,21 +38,24 @@ class MockMediator:
         return 1.0
 
     def get_eac_configuration(self):
-        # Return None - tests use ToyModel
-        return None
+        return self.eac_config
+
+    def get_active_channel(self):
+        return self.active_channel
 
 
 @pytest.fixture
-def mock_telescope_params():
-    """Fixture providing mock telescope parameters from EAC."""
-
-    class MockTelescope:
-        def __init__(self):
-            self.diam_circ = 8.0
-            self.lam = u.Quantity([0.2, 0.5, 0.7, 0.9, 1.1, 1.3, 1.5] * WAVELENGTH)
-            self.total_tele_refl = np.array([0.9, 0.8, 0.9, 0.98, 0.75, 0.55, 0.34])
-
-    return MockTelescope()
+def mock_eac_config():
+    """Fake unified EAC configuration dict, as produced by
+    Observatory._load_eac_configuration(). EACTelescope only reads the
+    top-level 'diameter' and 'temperature' keys.
+    """
+    return {
+        "diameter": 8.0,
+        "temperature": 290,
+        "IMAGER": {},
+        "IFS": {},
+    }
 
 
 @pytest.fixture
@@ -65,7 +66,6 @@ def full_telescope_parameters_imager():
         "unobscured_area": 0.9,
         "toverhead_fixed": 9000,
         "toverhead_multi": 1.2,
-        "telescope_optical_throughput": 0.85,
         "temperature": 280,
         "T_contamination": 0.98,
         "wavelength": 0.7,  # must be provided ALWAYS
@@ -80,7 +80,6 @@ def full_telescope_parameters_ifs():
         "unobscured_area": 0.9,
         "toverhead_fixed": 9000,
         "toverhead_multi": 1.2,
-        "telescope_optical_throughput": 0.85,
         "temperature": 280,
         "T_contamination": 0.98,
         "wavelength": [0.5, 0.7, 1.1],  # must be provided ALWAYS
@@ -93,11 +92,19 @@ def full_telescope_parameters_ifs():
 
 
 def test_toy_model_telescope_init():
-    """Test that ToyModelTelescope initializes with None values."""
+    """Test that ToyModelTelescope initializes with expected defaults."""
     telescope = ToyModelTelescope()
 
     assert telescope.path is None
-    assert telescope.keyword is None
+    assert telescope.keyword == "ToyModel"
+
+
+def test_toy_model_telescope_init_explicit_args():
+    """Test that explicit path/keyword args are stored as given."""
+    telescope = ToyModelTelescope(path="/some/path", keyword="CustomToy")
+
+    assert telescope.path == "/some/path"
+    assert telescope.keyword == "CustomToy"
 
 
 # ============================================================================
@@ -105,7 +112,7 @@ def test_toy_model_telescope_init():
 # ============================================================================
 
 
-def test_toy_model_telescope_load_configuration_user_params(
+def test_toy_model_telescope_load_configuration_user_params_imager(
     full_telescope_parameters_imager,
 ):
     """Test loading ToyModelTelescope configuration with user parameters."""
@@ -118,17 +125,14 @@ def test_toy_model_telescope_load_configuration_user_params(
     assert telescope.unobscured_area == 0.9
     assert telescope.toverhead_fixed == 9000 * TIME
     assert telescope.toverhead_multi == 1.2 * DIMENSIONLESS
-    assert np.all(telescope.telescope_optical_throughput == [0.85] * DIMENSIONLESS)
     assert telescope.temperature == 280 * TEMPERATURE
     assert telescope.T_contamination == 0.98 * DIMENSIONLESS
     assert np.isclose(telescope.Area.value, 45.2389, rtol=1e-4)
     assert telescope.Area.unit == LENGTH**2
 
 
-def test_toy_model_telescope_load_configuration_default_values(
-    full_telescope_parameters_imager,
-):
-    """Test that defaults are used when parameters not provided."""
+def test_toy_model_telescope_load_configuration_default_values_imager():
+    """Test that defaults are used when parameters not provided (IMAGER)."""
     telescope = ToyModelTelescope()
     mediator = MockMediator()
 
@@ -140,7 +144,6 @@ def test_toy_model_telescope_load_configuration_default_values(
     assert telescope.unobscured_area == 0.879
     assert telescope.toverhead_fixed == 8.25e3 * TIME
     assert telescope.toverhead_multi == 1.1 * DIMENSIONLESS
-    assert np.all(telescope.telescope_optical_throughput == [0.823] * DIMENSIONLESS)
     assert telescope.temperature == 290 * TEMPERATURE
     assert telescope.T_contamination == 0.95 * DIMENSIONLESS
     assert np.isclose(
@@ -154,7 +157,7 @@ def test_toy_model_telescope_load_configuration_default_values(
 # ============================================================================
 
 
-def test_toy_model_telescope_load_configuration_user_params(
+def test_toy_model_telescope_load_configuration_user_params_ifs(
     full_telescope_parameters_ifs,
 ):
     """Test loading ToyModelTelescope configuration with user parameters."""
@@ -167,17 +170,14 @@ def test_toy_model_telescope_load_configuration_user_params(
     assert telescope.unobscured_area == 0.9
     assert telescope.toverhead_fixed == 9000 * TIME
     assert telescope.toverhead_multi == 1.2 * DIMENSIONLESS
-    assert np.all(
-        telescope.telescope_optical_throughput == [0.85, 0.85, 0.85] * DIMENSIONLESS
-    )
     assert telescope.temperature == 280 * TEMPERATURE
     assert telescope.T_contamination == 0.98 * DIMENSIONLESS
     assert np.isclose(telescope.Area.value, 45.2389, rtol=1e-4)
     assert telescope.Area.unit == LENGTH**2
 
 
-def test_toy_model_telescope_load_configuration_default_values():
-    """Test that defaults are used when parameters not provided."""
+def test_toy_model_telescope_load_configuration_default_values_ifs():
+    """Test that defaults are used when parameters not provided (IFS)."""
     telescope = ToyModelTelescope()
     mediator = MockMediator("IFS")
 
@@ -189,9 +189,6 @@ def test_toy_model_telescope_load_configuration_default_values():
     assert telescope.unobscured_area == 0.879
     assert telescope.toverhead_fixed == 8.25e3 * TIME
     assert telescope.toverhead_multi == 1.1 * DIMENSIONLESS
-    assert np.all(
-        telescope.telescope_optical_throughput == [0.823, 0.823, 0.823] * DIMENSIONLESS
-    )
     assert telescope.temperature == 290 * TEMPERATURE
     assert telescope.T_contamination == 0.95 * DIMENSIONLESS
     assert np.isclose(
@@ -205,19 +202,16 @@ def test_toy_model_telescope_load_configuration_default_values():
 # ============================================================================
 
 
-@patch("eacy.load_telescope")
-def test_eac_telescope_load_configuration_user_params(
-    mock_load_telescope,
-    mock_telescope_params,
+def test_eac_telescope_load_configuration_user_params_imager(
+    mock_eac_config,
     full_telescope_parameters_imager,
     caplog,
 ):
-    """Test loading EACTelescope configuration with user parameters."""
+    """Test loading EACTelescope configuration with user parameters (IMAGER)."""
     import logging
 
-    mock_load_telescope.return_value = deepcopy(mock_telescope_params)
     telescope = EACTelescope(keyword="EAC1")
-    mediator = MockMediator("IMAGER")
+    mediator = MockMediator("IMAGER", eac_config=mock_eac_config)
 
     with caplog.at_level(logging.DEBUG):
         telescope.load_configuration(full_telescope_parameters_imager, mediator)
@@ -226,53 +220,32 @@ def test_eac_telescope_load_configuration_user_params(
     assert telescope.toverhead_fixed == 9000 * TIME
     assert telescope.toverhead_multi == 1.2 * DIMENSIONLESS
 
-    # LOCKED PARAMETERS: EVEN IF WE LOAD USER PARAMETERS, WE WANT THE DEFAULTS
-    assert telescope.diameter == 8.0 * LENGTH
+    # LOCKED PARAMETERS: EVEN IF WE LOAD USER PARAMETERS, WE WANT THE
+    # VALUES FROM THE UNIFIED EAC CONFIG, NOT THE USER-SUPPLIED ONES
+    assert telescope.diameter == mock_eac_config["diameter"] * LENGTH
     assert telescope.unobscured_area == 1.0
-
-    assert telescope.temperature == 290 * TEMPERATURE
+    assert telescope.temperature == mock_eac_config["temperature"] * TEMPERATURE
     assert telescope.T_contamination == 1.0 * DIMENSIONLESS
 
-    expected_throughput = average_over_bandpass(
-        {
-            "lam": mock_telescope_params.lam,
-            "total_tele_refl": mock_telescope_params.total_tele_refl.copy(),
-        },
-        mediator.get_observation_parameter("wavelength_range"),
-    )["total_tele_refl"]
-
-    assert np.isclose(
-        telescope.telescope_optical_throughput[0].value,
-        expected_throughput,
-        rtol=1e-5,
-    )
-    assert np.isclose(telescope.Area.value, 50.2655, rtol=1e-4)
+    expected_area = np.single(np.pi) / 4.0 * mock_eac_config["diameter"] ** 2.0 * 1.0
+    assert np.isclose(telescope.Area.value, expected_area, rtol=1e-4)
     assert telescope.Area.unit == LENGTH**2
 
-    # Check that warning messages were logged for locked parameters using default values
+    # Check that warning messages were logged for locked parameters using
+    # the EAC-supplied values instead of the user's override attempt
     warning_messages = [
         record.message for record in caplog.records if record.levelname == "WARNING"
     ]
-    locked_keys = {
-        "diameter",
-        "unobscured_area",
-        "T_contamination",
-        "temperature",
-        "telescope_optical_throughput",
-    }
+    locked_keys = {"diameter", "unobscured_area", "T_contamination", "temperature"}
     for key in locked_keys:
         assert any(
             key in msg and "is locked in this mode" in msg for msg in warning_messages
         ), f"Expected warning message for locked key '{key}' not found"
 
 
-@patch("eacy.load_telescope")
-def test_eac_telescope_load_configuration_default_values(
-    mock_load_telescope, mock_telescope_params
-):
-    """Test that defaults are used when parameters not provided."""
-    mock_load_telescope.return_value = deepcopy(mock_telescope_params)
-    mediator = MockMediator("IMAGER")
+def test_eac_telescope_load_configuration_default_values_imager(mock_eac_config):
+    """Test that defaults are used when optional parameters not provided (IMAGER)."""
+    mediator = MockMediator("IMAGER", eac_config=mock_eac_config)
 
     telescope = EACTelescope(keyword="EAC1")
     parameters = {
@@ -281,105 +254,62 @@ def test_eac_telescope_load_configuration_default_values(
 
     telescope.load_configuration(parameters, mediator)
 
-    # Defaults
-    assert telescope.diameter == 8.0 * LENGTH
+    assert telescope.diameter == mock_eac_config["diameter"] * LENGTH
     assert telescope.unobscured_area == 1.0
     assert telescope.toverhead_fixed == 8.25e3 * TIME
     assert telescope.toverhead_multi == 1.1 * DIMENSIONLESS
-    assert telescope.temperature == 290 * TEMPERATURE
+    assert telescope.temperature == mock_eac_config["temperature"] * TEMPERATURE
     assert telescope.T_contamination == 1.0 * DIMENSIONLESS
-    wavelength = mediator.get_observation_parameter("wavelength")
-    wavelength_range = [min(wavelength), max(wavelength)]
-    expected_throughput = average_over_bandpass(
-        {
-            "lam": mock_telescope_params.lam,
-            "total_tele_refl": mock_telescope_params.total_tele_refl.copy(),
-        },
-        wavelength_range,
-    )["total_tele_refl"]
 
-    assert np.isclose(
-        telescope.telescope_optical_throughput[0].value,
-        expected_throughput,
-        rtol=1e-5,
-    )
-    assert np.isclose(telescope.Area.value, 50.2655, rtol=1e-4)
+    expected_area = np.single(np.pi) / 4.0 * mock_eac_config["diameter"] ** 2.0 * 1.0
+    assert np.isclose(telescope.Area.value, expected_area, rtol=1e-4)
     assert telescope.Area.unit == LENGTH**2
 
 
-# # ============================================================================
-# # Tests for EACTelescope.load_configuration - IFS mode
-# # ============================================================================
+# ============================================================================
+# Tests for EACTelescope.load_configuration - IFS mode
+# ============================================================================
 
 
-@patch("eacy.load_telescope")
-def test_eac_telescope_load_configuration_user_params(
-    mock_load_telescope,
-    mock_telescope_params,
+def test_eac_telescope_load_configuration_user_params_ifs(
+    mock_eac_config,
     full_telescope_parameters_ifs,
     caplog,
 ):
-    """Test loading EACTelescope configuration with user parameters."""
+    """Test loading EACTelescope configuration with user parameters (IFS)."""
     import logging
 
-    mock_load_telescope.return_value = deepcopy(mock_telescope_params)
     telescope = EACTelescope(keyword="EAC1")
-    mediator = MockMediator("IFS")
+    mediator = MockMediator("IFS", eac_config=mock_eac_config)
 
     with caplog.at_level(logging.DEBUG):
         telescope.load_configuration(full_telescope_parameters_ifs, mediator)
 
-    # These values can be changed by the user
     assert telescope.toverhead_fixed == 9000 * TIME
     assert telescope.toverhead_multi == 1.2 * DIMENSIONLESS
 
-    # LOCKED PARAMETERS: EVEN IF WE LOAD USER PARAMETERS, WE WANT THE DEFAULTS
-    assert telescope.diameter == 8.0 * LENGTH
+    assert telescope.diameter == mock_eac_config["diameter"] * LENGTH
     assert telescope.unobscured_area == 1.0
-
-    assert telescope.temperature == 290 * TEMPERATURE
+    assert telescope.temperature == mock_eac_config["temperature"] * TEMPERATURE
     assert telescope.T_contamination == 1.0 * DIMENSIONLESS
-    wavelengths = mediator.get_observation_parameter("wavelength")
-    expected_throughput = interpolate_over_bandpass(
-        {
-            "lam": mock_telescope_params.lam,
-            "total_tele_refl": mock_telescope_params.total_tele_refl.copy(),
-        },
-        wavelengths,
-    )["total_tele_refl"]
-    print(expected_throughput, telescope.telescope_optical_throughput)
-    assert np.allclose(
-        telescope.telescope_optical_throughput.value,
-        expected_throughput,
-        rtol=1e-5,
-    )
-    assert np.isclose(telescope.Area.value, 50.2655, rtol=1e-4)
+
+    expected_area = np.single(np.pi) / 4.0 * mock_eac_config["diameter"] ** 2.0 * 1.0
+    assert np.isclose(telescope.Area.value, expected_area, rtol=1e-4)
     assert telescope.Area.unit == LENGTH**2
 
-    # Check that warning messages were logged for locked parameters using default values
     warning_messages = [
         record.message for record in caplog.records if record.levelname == "WARNING"
     ]
-    locked_keys = {
-        "diameter",
-        "unobscured_area",
-        "T_contamination",
-        "temperature",
-        "telescope_optical_throughput",
-    }
+    locked_keys = {"diameter", "unobscured_area", "T_contamination", "temperature"}
     for key in locked_keys:
         assert any(
             key in msg and "is locked in this mode" in msg for msg in warning_messages
         ), f"Expected warning message for locked key '{key}' not found"
 
 
-@patch("eacy.load_telescope")
-def test_eac_telescope_load_configuration_default_values(
-    mock_load_telescope, mock_telescope_params
-):
-    """Test that defaults are used when parameters not provided."""
-    mock_load_telescope.return_value = deepcopy(mock_telescope_params)
-    mediator = MockMediator("IFS")
+def test_eac_telescope_load_configuration_default_values_ifs(mock_eac_config):
+    """Test that defaults are used when optional parameters not provided (IFS)."""
+    mediator = MockMediator("IFS", eac_config=mock_eac_config)
 
     telescope = EACTelescope(keyword="EAC1")
     parameters = {
@@ -388,34 +318,73 @@ def test_eac_telescope_load_configuration_default_values(
 
     telescope.load_configuration(parameters, mediator)
 
-    # Defaults
-    assert telescope.diameter == 8.0 * LENGTH
+    assert telescope.diameter == mock_eac_config["diameter"] * LENGTH
     assert telescope.unobscured_area == 1.0
     assert telescope.toverhead_fixed == 8.25e3 * TIME
     assert telescope.toverhead_multi == 1.1 * DIMENSIONLESS
-    assert telescope.temperature == 290 * TEMPERATURE
+    assert telescope.temperature == mock_eac_config["temperature"] * TEMPERATURE
     assert telescope.T_contamination == 1.0 * DIMENSIONLESS
-    wavelengths = mediator.get_observation_parameter("wavelength")
-    expected_throughput = interpolate_over_bandpass(
-        {
-            "lam": mock_telescope_params.lam,
-            "total_tele_refl": mock_telescope_params.total_tele_refl.copy(),
-        },
-        wavelengths,
-    )["total_tele_refl"]
 
-    assert np.allclose(
-        telescope.telescope_optical_throughput.value,
-        expected_throughput,
-        rtol=1e-5,
-    )
-    assert np.isclose(telescope.Area.value, 50.2655, rtol=1e-4)
+    expected_area = np.single(np.pi) / 4.0 * mock_eac_config["diameter"] ** 2.0 * 1.0
+    assert np.isclose(telescope.Area.value, expected_area, rtol=1e-4)
     assert telescope.Area.unit == LENGTH**2
 
 
-# # ============================================================================
+# ============================================================================
+# Tests for the mediator-driven EAC-config fail-fast guard
+# ============================================================================
+
+
+def test_eac_telescope_missing_eac_configuration_raises_runtime_error():
+    """EACTelescope with an empty configuration will fail with a RuntimeError."""
+    telescope = EACTelescope(keyword="CustomModel")
+    mediator = MockMediator("IMAGER", eac_config=None)
+    parameters = {"wavelength": mediator.get_observation_parameter("wavelength")}
+
+    with pytest.raises(RuntimeError, match="Failed to load EAC configuration"):
+        telescope.load_configuration(parameters, mediator)
+
+
+# ============================================================================
+# Regression tests for the DEFAULT_CONFIG shared-mutable-class-attribute fix
+# ============================================================================
+
+
+def test_toy_model_telescope_default_config_not_shared_class_attribute():
+    """self.DEFAULT_CONFIG must be a distinct object from the class-level
+    dict immediately after __init__, and mutating one instance's copy must
+    not affect the class attribute or any other instance."""
+    telescope = ToyModelTelescope()
+
+    assert telescope.DEFAULT_CONFIG is not ToyModelTelescope.DEFAULT_CONFIG
+    assert telescope.DEFAULT_CONFIG == ToyModelTelescope.DEFAULT_CONFIG  # equal values
+
+    telescope.DEFAULT_CONFIG["diameter"] = 999 * LENGTH
+
+    other = ToyModelTelescope()
+    assert ToyModelTelescope.DEFAULT_CONFIG["diameter"] == 7.87 * LENGTH
+    assert other.DEFAULT_CONFIG["diameter"] == 7.87 * LENGTH
+
+
+def test_eac_telescope_default_config_not_shared_class_attribute():
+    """Same check for EACTelescope."""
+    telescope = EACTelescope(keyword="EAC1")
+
+    assert telescope.DEFAULT_CONFIG is not EACTelescope.DEFAULT_CONFIG
+    assert telescope.DEFAULT_CONFIG == EACTelescope.DEFAULT_CONFIG
+
+    telescope.DEFAULT_CONFIG["diameter"] = 999 * LENGTH
+
+    other = EACTelescope(keyword="EAC2")
+    assert EACTelescope.DEFAULT_CONFIG["diameter"] is None
+    assert other.DEFAULT_CONFIG["diameter"] is None
+
+
+# ============================================================================
 # Tests for Telescope.validate_configuration
 # ============================================================================
+# Unaffected by the refactor -- Telescope.validate_configuration() itself
+# did not change. Kept as-is.
 
 
 def test_telescope_validate_configuration_all_valid(
@@ -427,8 +396,7 @@ def test_telescope_validate_configuration_all_valid(
 
     telescope.load_configuration(full_telescope_parameters_imager, mediator)
 
-    # Should not raise
-    telescope.validate_configuration()
+    telescope.validate_configuration()  # should not raise
 
 
 def test_telescope_validate_configuration_missing_diameter(
@@ -480,28 +448,6 @@ def test_telescope_validate_configuration_incorrect_diameter_units(
 
 
 # ============================================================================
-# Tests for array parameter conversion
-# ============================================================================
-
-
-def test_toy_model_telescope_throughput_array_conversion():
-    """Test that telescope throughput is converted to numpy array."""
-    telescope = ToyModelTelescope()
-    mediator = MockMediator()
-
-    parameters = {
-        "diameter": 8.0,
-        "telescope_optical_throughput": [0.85, 0.90],  # List input
-        "wavelength": [0.5, 0.6],
-    }
-
-    telescope.load_configuration(parameters, mediator)
-
-    assert isinstance(telescope.telescope_optical_throughput.value, np.ndarray)
-    assert len(telescope.telescope_optical_throughput) == 2
-
-
-# ============================================================================
 # Tests for derived parameter calculations
 # ============================================================================
 
@@ -523,15 +469,10 @@ def test_toy_model_telescope_area_with_no_obscuration():
     assert np.isclose(telescope.Area.value, expected_area, rtol=1e-6)
 
 
-@patch("eacy.load_telescope")
-def test_eac_telescope_default_contamination(
-    mock_load_telescope, mock_telescope_params
-):
+def test_eac_telescope_default_contamination(mock_eac_config):
     """Test that EACTelescope uses default contamination factor."""
-    mock_load_telescope.return_value = deepcopy(mock_telescope_params)
-
+    mediator = MockMediator("IMAGER", eac_config=mock_eac_config)
     telescope = EACTelescope(keyword="EAC1")
-    mediator = MockMediator("IMAGER")
     parameters = {
         "observing_mode": "IMAGER",
         "wavelength": mediator.get_observation_parameter("wavelength"),
@@ -542,13 +483,12 @@ def test_eac_telescope_default_contamination(
     assert telescope.T_contamination == 1.0 * DIMENSIONLESS
 
 
-@patch("eacy.load_telescope")
-def test_eac_telescope_default_temperature(mock_load_telescope, mock_telescope_params):
-    """Test that EACTelescope uses default temperature."""
-    mock_load_telescope.return_value = deepcopy(mock_telescope_params)
-
+def test_eac_telescope_temperature_from_eac_config(mock_eac_config):
+    """Test that EACTelescope's temperature comes from the mediator's unified
+    eac_config, not a hardcoded class default (temperature default is None
+    in DEFAULT_CONFIG and must be filled in from eac_config)."""
+    mediator = MockMediator("IMAGER", eac_config=mock_eac_config)
     telescope = EACTelescope(keyword="EAC1")
-    mediator = MockMediator("IMAGER")
     parameters = {
         "observing_mode": "IMAGER",
         "wavelength": mediator.get_observation_parameter("wavelength"),
@@ -556,47 +496,4 @@ def test_eac_telescope_default_temperature(mock_load_telescope, mock_telescope_p
 
     telescope.load_configuration(parameters, mediator)
 
-    assert telescope.temperature == 290 * TEMPERATURE
-
-
-# ============================================================================
-# Tests for throughput shape consistency
-# ============================================================================
-
-
-@patch("eacy.load_telescope")
-def test_eac_telescope_throughput_shape_imager(
-    mock_load_telescope, mock_telescope_params
-):
-    """Test that throughput has correct shape in IMAGER mode (scalar)."""
-    mock_load_telescope.return_value = deepcopy(mock_telescope_params)
-
-    telescope = EACTelescope(keyword="EAC1")
-    mediator = MockMediator("IMAGER")
-    parameters = {
-        "observing_mode": "IMAGER",
-        "wavelength": mediator.get_observation_parameter("wavelength"),
-    }
-
-    telescope.load_configuration(parameters, mediator)
-
-    assert telescope.telescope_optical_throughput.shape == (1,)
-
-
-@patch("eacy.load_telescope")
-def test_eac_telescope_throughput_shape_ifs(mock_load_telescope, mock_telescope_params):
-    """Test that throughput has correct shape in IFS mode (matches wavelength array)."""
-    mock_load_telescope.return_value = deepcopy(mock_telescope_params)
-
-    telescope = EACTelescope(keyword="EAC1")
-    mediator = MockMediator("IFS")
-
-    parameters = {
-        "observing_mode": "IFS",
-        "wavelength": mediator.get_observation_parameter("wavelength"),
-    }
-
-    telescope.load_configuration(parameters, mediator)
-
-    wavelengths = mediator.get_observation_parameter("wavelength")
-    assert telescope.telescope_optical_throughput.shape == wavelengths.shape
+    assert telescope.temperature == mock_eac_config["temperature"] * TEMPERATURE

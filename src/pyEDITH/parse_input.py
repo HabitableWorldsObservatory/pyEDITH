@@ -472,8 +472,6 @@ def parse_parameters(parameters: dict) -> dict:
         "delta_mag",  # used to be [nmeananom x norbits x ntargs]
         "F0",  # for validation purposes, the calculation of F0 is different in AYO
         "det_npix_input",  # for validation purposes
-        # "telescope_optical_throughput",
-        # "coronagraph_optical_throughput",
     ]
 
     parsed_params.update(

@@ -4,6 +4,10 @@ from . import utils
 import astropy.units as u
 from .units import *
 from pyEDITH import parse_input
+import logging
+import copy
+
+logger = logging.getLogger("pyEDITH")
 
 
 class Detector(ABC):
@@ -120,7 +124,7 @@ class ToyModelDetector(Detector):
         * DIMENSIONLESS,  # Effective QE due to degradation, cosmic ray effects, readout inefficiencies
     }
 
-    def __init__(self, path: str = None, keyword: str = None):
+    def __init__(self, path: str = None, keyword: str = "ToyModel"):
         """
         Initialize a ToyModelDetector instance.
 
@@ -133,6 +137,7 @@ class ToyModelDetector(Detector):
         """
         self.path = path
         self.keyword = keyword
+        self.DEFAULT_CONFIG = copy.deepcopy(self.DEFAULT_CONFIG)
 
     def load_configuration(self, parameters: dict, mediator: object) -> None:
         """
@@ -168,7 +173,6 @@ class ToyModelDetector(Detector):
         # For IFS, the default config won't work. It needs to be propagated at every wavelength.
         # Normalize list shapes just in case.
         array_params = [
-            "npix_multiplier",
             "DC",
             "RN",
             "tread",
@@ -182,7 +186,7 @@ class ToyModelDetector(Detector):
                 key: parse_input.normalize_list_shapes(
                     self.DEFAULT_CONFIG,
                     key,
-                    mediator.get_observation_parameter("nlambda"),
+                    len(mediator.get_observation_parameter("wavelength")),
                 )
                 for key in array_params
             }
@@ -225,18 +229,19 @@ class EACDetector(Detector):
 
     DEFAULT_CONFIG = {
         "pixscale_mas": None,  # Detector pixel scale in milliarcseconds.
-        "npix_multiplier": 1
+        "npix_multiplier": 1  # TODO TO ADD TO YAML?
         * DIMENSIONLESS,  # Number of detector pixels per image plane "pixel".
         "DC": None,  # Dark current (counts pix^-1 s^-1, nlambda array)
         "RN": None,  # Read noise (counts pix^-1 read^-1, nlambda array)
-        "tread": [1000] * READ_TIME,  # Read time (s, nlambda array) # TO ADD TO YAML
+        "tread": [1000]
+        * READ_TIME,  # Read time (s, nlambda array) # TODO TO ADD TO YAML
         "CIC": [0]
         * CLOCK_INDUCED_CHARGE,  # Clock-induced charge (counts pix^-1 photon_count^-1, nlambda array) # TO ADD TO YAML
         "QE": None,  # Quantum efficiency of detector
         "dQE": None,  # Effective QE due to degradation, cosmic ray effects, readout inefficiencies
     }
 
-    def __init__(self, path: str = None, keyword: str = None):
+    def __init__(self, path: str = None, keyword: str = ""):
         """
         Initialize an EACDetector instance.
 
@@ -249,6 +254,7 @@ class EACDetector(Detector):
         """
         self.path = path
         self.keyword = keyword
+        self.DEFAULT_CONFIG = copy.deepcopy(self.DEFAULT_CONFIG)
 
     def load_configuration(self, parameters: dict, mediator: object) -> None:
         """
@@ -283,7 +289,7 @@ class EACDetector(Detector):
         eac_config = mediator.get_eac_configuration()
 
         # For EAC detectors, configuration must be available
-        if self.keyword.startswith("EAC") and eac_config is None:
+        if eac_config is None:
             raise RuntimeError(
                 f"Failed to load EAC configuration for {self.keyword}. "
                 f"Cannot proceed with detector initialization."
@@ -292,22 +298,45 @@ class EACDetector(Detector):
         if eac_config is not None:
             # **** LOAD FROM UNIFIED EAC CONFIGURATION ****
             obs_mode = mediator.get_observation_parameter("observing_mode")
+            active_channel = mediator.get_active_channel()
             mode_config = eac_config[obs_mode]
 
-            # Use only the single active channel's data -- no cross-channel merging,
-            # no VIS/NIR string-matching, no bug-prone [0]-indexing into tuples.
-            active_channel = mediator.get_active_channel()
+            if active_channel is not None and active_channel in mode_config:
+                channel_config = mode_config[active_channel]
 
-            if active_channel is not None and active_channel in mode_config["qe"]:
+                # BIN CONFIGURATION DATA TO WAVELENGTH OF INTEREST
+                curve_keys = ["qe", "dqe"]
+                rebinned = utils.rebin_channel_curves_to_grid(
+                    channel_config["spectral"],
+                    curve_keys,
+                    to_wavelength=mediator.get_observation_parameter(
+                        "wavelength"
+                    ).value,
+                    to_delta_wavelength=(
+                        mediator.get_observation_parameter("delta_wavelength").value
+                        if mediator.get_observation_parameter("delta_wavelength")
+                        is not None
+                        else None
+                    ),
+                    interpolation=(
+                        "Gaussian"
+                        if mediator.get_observation_parameter("delta_wavelength")
+                        is not None
+                        else "1d"
+                    ),
+                    obs_mode=obs_mode,
+                    wavelength_range=mediator.get_observation_parameter(
+                        "wavelength_range"
+                    ),
+                )
+
                 # REMINDER: These values are already binned at the right wavelength
                 # points because we ran rebin_channel_curves_to_grid
                 self.DEFAULT_CONFIG["QE"] = (
-                    np.asarray(mode_config["qe"][active_channel]) * QUANTUM_EFFICIENCY
+                    np.asarray(rebinned["qe"]) * QUANTUM_EFFICIENCY
                 )
 
-                self.DEFAULT_CONFIG["dQE"] = (
-                    np.asarray(mode_config["dqe"][active_channel]) * DIMENSIONLESS
-                )
+                self.DEFAULT_CONFIG["dQE"] = np.asarray(rebinned["dqe"]) * DIMENSIONLESS
 
                 # Double checking length:
                 for key in ["QE", "dQE"]:
@@ -315,28 +344,32 @@ class EACDetector(Detector):
                         mediator.get_observation_parameter("wavelength")
                     ), f"{key} array length does not match observation wavelength grid after rebinning."
 
-                self.DEFAULT_CONFIG["DC"] = [
-                    mode_config["dc"][active_channel]
-                ] * DARK_CURRENT
-                self.DEFAULT_CONFIG["RN"] = [
-                    mode_config["rn"][active_channel]
-                ] * READ_NOISE
+                self.DEFAULT_CONFIG["DC"] = [channel_config["dc"]] * DARK_CURRENT
+                self.DEFAULT_CONFIG["RN"] = [channel_config["rn"]] * READ_NOISE
                 self.DEFAULT_CONFIG["CIC"] = (
-                    mode_config["cic"][active_channel] * CLOCK_INDUCED_CHARGE
+                    channel_config["cic"] * CLOCK_INDUCED_CHARGE
                 )
 
             else:
                 raise RuntimeError("Could not parse detector specs.")
 
-        # Calculate default detector pixel scale based on telescope
-        self.DEFAULT_CONFIG["pixscale_mas"] = (
-            0.5
-            * lambda_d_to_arcsec(
-                1 * LAMBDA_D,
-                0.5e-6 * LENGTH,
-                mediator.get_telescope_parameter("diameter").to(LENGTH),
+        # PIXEL SCALE: get it from the YAML files, or assume one
+
+        self.DEFAULT_CONFIG["pixscale_mas"] = channel_config["pixscale_mas"] * MAS
+
+        # Recalculate pixel scale if diameter is different
+        if mediator.get_telescope_parameter("diameter").value != eac_config["diameter"]:
+            logger.warning(
+                "Diameter value has been overwritten. Recalculating pixel scale..."
             )
-        ).to(MAS)
+            self.DEFAULT_CONFIG["pixscale_mas"] = (
+                0.5
+                * lambda_d_to_arcsec(
+                    1 * LAMBDA_D,
+                    0.5e-6 * LENGTH,
+                    mediator.get_telescope_parameter("diameter").to(LENGTH),
+                )
+            ).to(MAS)
 
         self.DEFAULT_CONFIG["tread"] = (
             np.full_like(
@@ -345,6 +378,28 @@ class EACDetector(Detector):
                 dtype=np.float64,
             )
             * READ_TIME
+        )
+
+        # For IFS, the default config won't work. It needs to be propagated at every wavelength.
+        # Normalize list shapes just in case.
+        array_params = [
+            "DC",
+            "RN",
+            "tread",
+            "CIC",
+            "QE",
+            "dQE",
+        ]
+
+        self.DEFAULT_CONFIG.update(
+            {
+                key: parse_input.normalize_list_shapes(
+                    self.DEFAULT_CONFIG,
+                    key,
+                    len(mediator.get_observation_parameter("wavelength")),
+                )
+                for key in array_params
+            }
         )
 
         # Load parameters, use defaults if not provided

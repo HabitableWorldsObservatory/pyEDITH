@@ -1715,33 +1715,337 @@ def test_fill_parameters_override_not_provided(test_object, caplog):
     assert "Before overriding: rebinning DC" not in caplog.text
 
 
-# def test_fill_parameters_step0_integration_with_step1(test_object, caplog):
-#     """Test that rebinned DC from STEP 0 is correctly applied as override in STEP 1."""
-#     parameters = {
-#         "wavelength": np.array([500, 600, 700]) * u.nm,
-#         "DC": np.array([1e-3, 2e-3, 1.5e-3]) * u.electron / u.s / u.pix,
-#     }
-#     rebinned_wavelength = np.array([500, 550, 600, 650, 700]) * u.nm
-#     default_parameters = {
-#         "wavelength": np.array([500, 600, 700]) * u.nm,
-#         "DC": 1e-3 * u.electron / u.s / u.pix,
-#     }
-#     locked_keys = {"DC"}
-#     allow_override = {"DC"}
+from unittest.mock import patch
 
-#     with caplog.at_level(logging.WARNING):
-#         fill_parameters(
-#             test_object,
-#             parameters,
-#             default_parameters,
-#             locked_keys,
-#             allow_override,
-#             rebinned_wavelength,
-#         )
+# ============================================================================
+# Fixtures for rebin_channel_curves_to_grid
+# ============================================================================
 
-#     # Check that DC was rebinned then applied as override
-#     assert len(test_object.DC) == len(rebinned_wavelength)
-#     assert isinstance(test_object.DC, u.Quantity)
-#     assert test_object.DC.unit == u.electron / u.s / u.pix
-#     # Should see the override warning from STEP 1
-#     assert "explicitly overridden" in caplog.text
+
+@pytest.fixture
+def sample_spectral_dict():
+    """Fixture providing a simple channel-native spectral dict for testing."""
+    return {
+        "wavelength": np.array([0.40, 0.45, 0.50, 0.55, 0.60]),
+        "qe": np.array([0.5, 0.6, 0.7, 0.8, 0.9]),
+        "dqe": np.array([0.90, 0.91, 0.92, 0.93, 0.94]),
+    }
+
+
+@pytest.fixture
+def sample_to_wavelength():
+    """Fixture providing a target wavelength grid."""
+    return np.linspace(0.40, 0.60, 10)
+
+
+# ============================================================================
+# Tests for rebin_channel_curves_to_grid - Missing "wavelength" key
+# ============================================================================
+
+
+def test_rebin_channel_curves_to_grid_no_wavelength_key(sample_to_wavelength, caplog):
+    """Test that missing 'wavelength' key returns an empty dict and logs debug."""
+    spectral = {"qe": np.array([0.5, 0.6, 0.7])}
+
+    with caplog.at_level(logging.DEBUG, logger="pyEDITH"):
+        result = rebin_channel_curves_to_grid(spectral, ["qe"], sample_to_wavelength)
+
+    assert result == {}
+    assert "No 'wavelength' array found" in caplog.text
+
+
+# ============================================================================
+# Tests for rebin_channel_curves_to_grid - Missing curve keys
+# ============================================================================
+
+
+def test_rebin_channel_curves_to_grid_key_not_in_spectral(
+    sample_spectral_dict, sample_to_wavelength, caplog
+):
+    """Test that curve keys not present in spectral are skipped and logged."""
+    with caplog.at_level(logging.DEBUG, logger="pyEDITH"):
+        result = rebin_channel_curves_to_grid(
+            sample_spectral_dict,
+            ["qe", "missing_curve"],
+            sample_to_wavelength,
+            obs_mode="IFS",
+        )
+
+    assert "qe" in result
+    assert "missing_curve" not in result
+    assert "missing_curve was not found in YAML files" in caplog.text
+
+
+def test_rebin_channel_curves_to_grid_empty_curve_keys(
+    sample_spectral_dict, sample_to_wavelength
+):
+    """Test that an empty curve_keys list returns an empty dict."""
+    result = rebin_channel_curves_to_grid(
+        sample_spectral_dict, [], sample_to_wavelength, obs_mode="IFS"
+    )
+
+    assert result == {}
+
+
+# ============================================================================
+# Tests for rebin_channel_curves_to_grid - IMAGER (temporary) path
+# ============================================================================
+
+
+def test_rebin_channel_curves_to_grid_imager_mode_basic(
+    sample_spectral_dict, sample_to_wavelength
+):
+    """Test that IMAGER mode returns a bandpass-averaged single value."""
+    wavelength_range = [0.45 * WAVELENGTH, 0.55 * WAVELENGTH]
+
+    result = rebin_channel_curves_to_grid(
+        sample_spectral_dict,
+        ["qe"],
+        sample_to_wavelength,
+        obs_mode="IMAGER",
+        wavelength_range=wavelength_range,
+    )
+
+    assert "qe" in result
+    # Result should be a single-element list (bandpass average, not resampled)
+    assert len(result["qe"]) == 1
+
+
+def test_rebin_channel_curves_to_grid_imager_mode_multiple_keys(
+    sample_spectral_dict, sample_to_wavelength
+):
+    """Test that IMAGER mode processes multiple curve keys independently."""
+    wavelength_range = [0.40 * WAVELENGTH, 0.60 * WAVELENGTH]
+
+    result = rebin_channel_curves_to_grid(
+        sample_spectral_dict,
+        ["qe", "dqe"],
+        sample_to_wavelength,
+        obs_mode="IMAGER",
+        wavelength_range=wavelength_range,
+    )
+
+    assert set(result.keys()) == {"qe", "dqe"}
+    assert len(result["qe"]) == 1
+    assert len(result["dqe"]) == 1
+
+
+def test_rebin_channel_curves_to_grid_imager_mode_logs_debug(
+    sample_spectral_dict, sample_to_wavelength, caplog
+):
+    """Test that IMAGER mode logs a bandpass-averaging debug message."""
+    wavelength_range = [0.45 * WAVELENGTH, 0.55 * WAVELENGTH]
+
+    with caplog.at_level(logging.DEBUG, logger="pyEDITH"):
+        rebin_channel_curves_to_grid(
+            sample_spectral_dict,
+            ["qe"],
+            sample_to_wavelength,
+            obs_mode="IMAGER",
+            wavelength_range=wavelength_range,
+        )
+
+    assert "Bandpass-averaged 'qe'" in caplog.text
+    assert "IMAGER temporary path" in caplog.text
+
+
+def test_rebin_channel_curves_to_grid_imager_mode_calls_average_over_bandpass(
+    sample_spectral_dict, sample_to_wavelength
+):
+    """Test that IMAGER mode delegates to average_over_bandpass with correct args."""
+    wavelength_range = [0.45 * WAVELENGTH, 0.55 * WAVELENGTH]
+
+    with patch(
+        "pyEDITH.utils.average_over_bandpass",
+        wraps=average_over_bandpass,
+    ) as mock_avg:
+        rebin_channel_curves_to_grid(
+            sample_spectral_dict,
+            ["qe"],
+            sample_to_wavelength,
+            obs_mode="IMAGER",
+            wavelength_range=wavelength_range,
+        )
+
+    mock_avg.assert_called_once()
+    called_params, called_range = mock_avg.call_args[0]
+    assert "lam" in called_params
+    assert "value" in called_params
+    assert called_range == wavelength_range
+
+
+# ============================================================================
+# Tests for rebin_channel_curves_to_grid - IFS (resampling) path
+# ============================================================================
+
+
+def test_rebin_channel_curves_to_grid_non_imager_basic(
+    sample_spectral_dict, sample_to_wavelength
+):
+    """Test that non-IMAGER mode resamples curve onto to_wavelength grid."""
+    result = rebin_channel_curves_to_grid(
+        sample_spectral_dict,
+        ["qe"],
+        sample_to_wavelength,
+        obs_mode="IFS",
+    )
+
+    assert "qe" in result
+    assert len(result["qe"]) == len(sample_to_wavelength)
+
+
+def test_rebin_channel_curves_to_grid_non_imager_logs_debug(
+    sample_spectral_dict, sample_to_wavelength, caplog
+):
+    """Test that non-IMAGER mode logs a rebinning debug message."""
+    with caplog.at_level(logging.DEBUG, logger="pyEDITH"):
+        rebin_channel_curves_to_grid(
+            sample_spectral_dict,
+            ["qe"],
+            sample_to_wavelength,
+            obs_mode="IFS",
+        )
+
+    assert "Rebinned 'qe'" in caplog.text
+    assert "native points" in caplog.text
+
+
+def test_rebin_channel_curves_to_grid_sorts_and_deduplicates_wavelengths(
+    sample_to_wavelength,
+):
+    """Test that unsorted/duplicate native wavelengths are sorted and deduped
+    before resampling."""
+    spectral = {
+        "wavelength": np.array([0.50, 0.40, 0.50, 0.60]),
+        "qe": np.array([2.0, 1.0, 2.0, 3.0]),
+    }
+
+    # Should not raise despite unsorted/duplicate input, and should produce
+    # a monotonic result consistent with sorted+deduped values [1, 2, 3]
+    result = rebin_channel_curves_to_grid(
+        spectral,
+        ["qe"],
+        sample_to_wavelength,
+        obs_mode="IFS",
+    )
+
+    assert "qe" in result
+    assert len(result["qe"]) == len(sample_to_wavelength)
+    values = np.asarray(result["qe"])
+    assert np.all(np.diff(values) >= -1e-8)  # roughly increasing
+
+
+def test_rebin_channel_curves_to_grid_single_wavelength_point(
+    sample_to_wavelength,
+):
+    """Test that a single native wavelength point skips sort/dedup and still resamples."""
+    spectral = {
+        "wavelength": np.array([0.50]),
+        "qe": np.array([0.75]),
+    }
+
+    result = rebin_channel_curves_to_grid(
+        spectral,
+        ["qe"],
+        sample_to_wavelength,
+        obs_mode="IFS",
+    )
+
+    assert "qe" in result
+    assert len(result["qe"]) == len(sample_to_wavelength)
+    assert np.allclose(np.asarray(result["qe"]), 0.75)
+
+
+def test_rebin_channel_curves_to_grid_gaussian_interpolation_with_delta(
+    sample_spectral_dict, sample_to_wavelength
+):
+    """Test that Gaussian interpolation runs successfully when to_delta_wavelength
+    is provided."""
+    to_delta_wavelength = np.full_like(sample_to_wavelength, 0.02)
+
+    result = rebin_channel_curves_to_grid(
+        sample_spectral_dict,
+        ["qe"],
+        sample_to_wavelength,
+        to_delta_wavelength=to_delta_wavelength,
+        interpolation="Gaussian",
+        obs_mode="IFS",
+    )
+
+    assert "qe" in result
+    assert len(result["qe"]) == len(sample_to_wavelength)
+
+
+def test_rebin_channel_curves_to_grid_non_imager_calls_resample(
+    sample_spectral_dict, sample_to_wavelength
+):
+    """Test that non-IMAGER mode delegates to resample_to_wavelength_grid with
+    correct arguments."""
+    with patch(
+        "pyEDITH.utils.resample_to_wavelength_grid",
+        wraps=resample_to_wavelength_grid,
+    ) as mock_resample:
+        rebin_channel_curves_to_grid(
+            sample_spectral_dict,
+            ["qe"],
+            sample_to_wavelength,
+            interpolation="1d",
+            obs_mode="IFS",
+        )
+
+    mock_resample.assert_called_once()
+    _, kwargs = mock_resample.call_args
+    assert kwargs["name"] == "qe"
+    assert kwargs["interpolation"] == "1d"
+    assert np.array_equal(kwargs["to_wavelength"], sample_to_wavelength)
+
+
+# ============================================================================
+# Tests for rebin_channel_curves_to_grid - Mixed IMAGER/non-IMAGER key skipping
+# ============================================================================
+
+
+def test_rebin_channel_curves_to_grid_returns_only_requested_present_keys(
+    sample_spectral_dict, sample_to_wavelength
+):
+    """Test that only curve keys present in spectral and requested are returned."""
+    result = rebin_channel_curves_to_grid(
+        sample_spectral_dict,
+        ["qe", "nonexistent"],
+        sample_to_wavelength,
+        obs_mode="IFS",
+    )
+
+    assert list(result.keys()) == ["qe"]
+
+
+def test_rebin_channel_curves_to_grid_gaussian_without_delta_wavelength_raises(
+    sample_spectral_dict, sample_to_wavelength
+):
+    """Test that Gaussian interpolation without to_delta_wavelength raises ValueError."""
+    with pytest.raises(ValueError, match="to_delta_wavelength must be provided"):
+        rebin_channel_curves_to_grid(
+            sample_spectral_dict,
+            ["qe"],
+            sample_to_wavelength,
+            to_delta_wavelength=None,
+            interpolation="Gaussian",
+            obs_mode="IFS",
+        )
+
+
+def test_rebin_channel_curves_to_grid_gaussian_without_delta_wavelength_raises_even_for_imager(
+    sample_spectral_dict, sample_to_wavelength
+):
+    """Test that the Gaussian/to_delta_wavelength validation fires before the
+    IMAGER early-return path (i.e., is checked regardless of obs_mode)."""
+    with pytest.raises(ValueError, match="to_delta_wavelength must be provided"):
+        rebin_channel_curves_to_grid(
+            sample_spectral_dict,
+            ["qe"],
+            sample_to_wavelength,
+            to_delta_wavelength=None,
+            interpolation="Gaussian",
+            obs_mode="IMAGER",
+            wavelength_range=[0.1, 0.2] * WAVELENGTH,
+        )

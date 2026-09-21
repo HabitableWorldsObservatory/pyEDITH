@@ -162,6 +162,9 @@ class Observatory(ABC):  # abstract class
         # Load unified EAC configuration (from hwome or eacy)
         if keyword.startswith("EAC"):
             self.configuration = Observatory._load_eac_configuration(keyword)
+            # validate configuration
+            Observatory.validate_engineering_config(self.configuration, keyword)
+
         else:
             self.configuration = None
         return
@@ -325,28 +328,14 @@ class Observatory(ABC):  # abstract class
         """
         # For EAC4-6, try hwome first
         if eac_keyword in ["EAC4", "EAC5", "EAC6"]:
-            try:
-                config = Observatory._ingest_from_hwome(eac_name=eac_keyword.lower())
-                logger.info(f"Loaded {eac_keyword} configuration from hwome")
-                return config
-            except ImportError as e:
-                logger.warning(
-                    f"hwome not available ({e}). Falling back to eacy for {eac_keyword}."
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Could not load {eac_keyword} from hwome: {e}. "
-                    f"Falling back to eacy."
-                )
-
+            config = Observatory._ingest_from_hwome(eac_name=eac_keyword.lower())
+            logger.info(f"Loaded {eac_keyword} configuration from hwome")
+            return config
         # Use eacy (either for EAC1-3 or as fallback for EAC4-6)
-        try:
+        else:
             logger.info(f"Loading {eac_keyword} configuration from eacy")
             config = Observatory._convert_eacy_to_unified_format(eac_keyword)
             return config
-        except Exception as e:
-            logger.error(f"Failed to load {eac_keyword} configuration from eacy: {e}")
-            return None
 
     @staticmethod
     def _convert_eacy_to_unified_format(eac_keyword):
@@ -377,8 +366,22 @@ class Observatory(ABC):  # abstract class
             Configuration with keys:
             - diameter : float
             - temperature : float (hardcoded default for eacy)
-            - IMAGER : dict with "vis"/"nir" channel data (from load_detector("IMAGER"))
-            - IFS : dict with "vis"/"nir" channel data (from load_detector("IFS"))
+            - IMAGER : dict
+                Mapping of channel name ("vis"/"nir") -> channel configuration:
+                    {
+                        "pixscale_mas": float,   # filled later
+                        "dc": float,
+                        "rn": float,
+                        "cic": float,
+                        "spectral": {
+                            "wavelength": array,
+                            "optics_throughput": array,
+                            "qe": array,
+                            "dqe": array,
+                        },
+                    }
+            - IFS : dict
+                Same structure as IMAGER, from load_detector("IFS")
         """
         from eacy import load_telescope, load_detector, load_instrument
 
@@ -390,6 +393,15 @@ class Observatory(ABC):  # abstract class
             "temperature": 290.0,  # Default for eacy (not in eacy data)
         }
 
+        # calculate pixscale from diam_circ
+        pixscale = (
+            0.5
+            * lambda_d_to_arcsec(
+                1 * LAMBDA_D,
+                0.5e-6 * LENGTH,
+                telescope["diam_circ"] * LENGTH,
+            )
+        ).to(MAS)
         # telescope["lam"] and detector["lam"] are the same array (eacy's shared
         # internal_lam grid) -- one wavelength array serves both optics
         # throughput and QE, for both modes.
@@ -402,68 +414,42 @@ class Observatory(ABC):  # abstract class
         for obs_mode in ("IMAGER", "IFS"):
             detector = load_detector(obs_mode).__dict__
 
-            qe_vis = np.atleast_1d(detector["qe_vis"])
-            qe_nir = np.atleast_1d(detector["qe_nir"])
+            mode_config = {}
 
-            # eacy's interp_arr fills out-of-domain wavelengths with NaN, and
-            # the subsequent np.clip(..., 0, None) preserves NaN (np.clip is
-            # built on np.maximum/np.minimum, which propagate NaN). This is
-            # how each channel's native wavelength domain is recovered here.
-            vis_mask = np.isfinite(qe_vis)
-            nir_mask = np.isfinite(qe_nir)
+            for channel in ("vis", "nir"):
+                qe = np.atleast_1d(detector[f"qe_{channel}"])
 
-            if not vis_mask.any() or not nir_mask.any():
-                raise ValueError(
-                    f"Could not determine distinct vis/nir wavelength domains "
-                    f"for {eac_keyword} ({obs_mode}). qe_vis or qe_nir has no "
-                    f"finite values -- check eacy's NaN-padding convention."
-                )
+                # Channel mask: intersection of finite throughput and finite qe
+                throughput_finite = np.isfinite(combined_throughput)
+                qe_finite = np.isfinite(qe)
+                channel_mask = throughput_finite & qe_finite
+                if not channel_mask.any():
+                    raise ValueError(
+                        f"Could not determine distinct {channel} wavelength "
+                        f"domain for {eac_keyword} ({obs_mode}). No intersection "
+                        f"of finite throughput and qe_{channel} values."
+                    )
 
-            mode_config = {
-                "optics_throughput": {
-                    "vis": {
-                        "wavelength": list(wavelengths_um[vis_mask]),
-                        "throughput": list(combined_throughput[vis_mask]),
-                    },
-                    "nir": {
-                        "wavelength": list(wavelengths_um[nir_mask]),
-                        "throughput": list(combined_throughput[nir_mask]),
-                    },
-                },
-                "qe": {
-                    "vis": {
-                        "wavelength": list(wavelengths_um[vis_mask]),
-                        "qe": list(qe_vis[vis_mask]),
-                    },
-                    "nir": {
-                        "wavelength": list(wavelengths_um[nir_mask]),
-                        "qe": list(qe_nir[nir_mask]),
-                    },
-                },
-                "dqe": {
-                    "vis": {
-                        "wavelength": list(wavelengths_um[vis_mask]),
-                        "qe": np.ones_like(qe_vis[vis_mask]) * DEFAULT_DQE,
-                    },
-                    "nir": {
-                        "wavelength": list(wavelengths_um[nir_mask]),
-                        "qe": np.ones_like(qe_nir[nir_mask]) * DEFAULT_DQE,
-                    },
-                },
-                "dc": {
-                    "vis": float(detector["dc_vis"]),
-                    "nir": float(detector["dc_nir"]),
-                },
-                "rn": {
-                    "vis": float(detector["rn_vis"]),
-                    "nir": float(detector["rn_nir"]),
-                },
-                "cic": {
-                    "vis": 0.0,  # eacy's cic_vis/cic_nir are always None ("NOT IMPLEMENTED YET")
-                    "nir": 0.0,
-                },
-                "pixscale_mas": {"vis": None, "nir": None},  # filled later
-            }
+                qe_masked = qe[channel_mask]
+
+                spectral = {
+                    "wavelength": list(wavelengths_um[channel_mask]),
+                    "optics_throughput": list(combined_throughput[channel_mask]),
+                    "qe": list(qe_masked),
+                    "dqe": np.ones_like(qe_masked) * DEFAULT_DQE,
+                }
+
+                mode_config[channel] = {
+                    "pixscale_mas": pixscale.value,
+                    "dc": float(detector[f"dc_{channel}"]),
+                    "rn": float(detector[f"rn_{channel}"]),
+                    "cic": 0.0,  # eacy's cic_vis/cic_nir are always None ("NOT IMPLEMENTED YET")
+                    "wavelength_range": (
+                        float(wavelengths_um[channel_mask].min()),
+                        float(wavelengths_um[channel_mask].max()),
+                    ),
+                    "spectral": spectral,
+                }
 
             unified_config[obs_mode] = mode_config
 
@@ -495,16 +481,25 @@ class Observatory(ABC):  # abstract class
             - diameter : float
                 Telescope circumscribed diameter in meters
             - temperature : float
-                Median temperature of the optical path in Kelvin
+                Temperature of the primary mirror
             - IMAGER : dict
-                Configuration for imaging mode with wavelength-dependent parameters
+                Mapping of channel name -> channel configuration, where each
+                channel configuration is:
+                    {
+                        "pixscale_mas": float,
+                        "dc": float,          # dark current, ct/px/s
+                        "rn": float,          # read noise
+                        "cic": float,         # clock-induced charge, ct/px
+                        "spectral": {
+                            "wavelength": array,          # in WAVELENGTH units
+                            "optics_throughput": array,
+                            "qe": array,
+                            "dqe": array,
+                        },
+                    }
             - IFS : dict
-                Configuration for spectroscopy mode with wavelength-dependent parameters
+                Same structure as IMAGER, for spectroscopy-mode channels.
 
-        Notes
-        -----
-        The returned configuration is structured to be compatible with the existing
-        pyEDITH telescope, detector, and coronagraph loading mechanisms.
         """
 
         from hwome.roam.analyzer import Analyzer
@@ -515,7 +510,7 @@ class Observatory(ABC):  # abstract class
 
         nav = (
             system.system.Mask
-        )  # generic -we could iterate all the masks, but we only need one since they don't have real values (throughput 0.99)
+        )  # generic - we could iterate all the masks, but we only need one since they don't have real values (throughput 0.99)
         mask_name = next(iter(nav.name.values())).value
 
         hwo_configuration = {}
@@ -544,96 +539,329 @@ class Observatory(ABC):  # abstract class
                 center_nm=None,
             )
 
-            # Initialize parameter dictionaries for each channel
-            configuration_by_obs["optics_throughput"] = {}
-            configuration_by_obs["pixscale_mas"] = {}
-            configuration_by_obs["dc"] = {}
-            configuration_by_obs["rn"] = {}
-            configuration_by_obs["cic"] = {}
-            configuration_by_obs["qe"] = {}
-            configuration_by_obs["dqe"] = {}
-
             # Process each channel
             for chan_name, cdict in options.items():
+
+                # locate the "FULL" channel
+                full_channel_key = [
+                    key for key in options[chan_name].keys() if "FULL" in key
+                ][0]
+
+                fdict = cdict[full_channel_key]
 
                 # Wavelength-dependent arrays
                 channel_throughput = []
                 channel_wavelength = []
                 channel_qe = []
 
-                # Iterate through filters in this channel
-                for filt_name, fdict in cdict.items():
-                    parts = fdict["path"].split(".")
+                parts = fdict["path"].split(".")
 
-                    optical_path = system.system.OpticalPath.select(
-                        Instrument=parts[0],
-                        Channel=parts[1],
-                        Filter=parts[-1],
-                        Mask=mask_name,
-                    )
-                    tp = optical_path.throughput(include_detector=True)
+                optical_path = system.system.OpticalPath.select(
+                    Instrument=parts[0],
+                    Channel=parts[1],
+                    Filter=parts[-1],
+                    Mask=mask_name,
+                )
 
-                    # Separate optical throughput from detector QE
-                    optical_throughput = np.prod(
-                        tp.v[:-1], axis=0
-                    )  # Use [:-1] to not include the detector QE which is always last
-                    qe = tp.v[-1]
+                tp = optical_path.throughput(include_detector=True)
 
-                    # Apply wavelength mask for this filter
-                    mask = (tp.w > (fdict["center"] - fdict["width"] / 2)) & (
-                        tp.w < (fdict["center"] + fdict["width"] / 2)
-                    )
+                # Separate optical throughput from detector QE
+                optical_throughput = np.prod(
+                    tp.v[:-1], axis=0
+                )  # Use [:-1] to not include the detector QE which is always last
+                qe = tp.v[-1]
 
-                    channel_throughput.extend(list(optical_throughput[mask]))
-                    channel_wavelength.extend(list(tp.w.value[mask]))
-                    channel_qe.extend(list(qe[mask]))
+                lower_edge = np.maximum(
+                    (fdict["center"] - fdict["width"] / 2),
+                    optical_path.Channel.band_min.q,
+                )
+                higher_edge = np.minimum(
+                    (fdict["center"] + fdict["width"] / 2),
+                    optical_path.Channel.band_max.q,
+                )
+                mask = (tp.w > lower_edge) & (tp.w < higher_edge)
 
-                # Sort by wavelength and apply same sorting to all arrays
-                sorted_indices = np.argsort(channel_wavelength)
-                channel_wavelength = [channel_wavelength[i] for i in sorted_indices]
-                channel_throughput = [channel_throughput[i] for i in sorted_indices]
-                channel_qe = [channel_qe[i] for i in sorted_indices]
+                channel_throughput.extend(list(optical_throughput[mask]))
+                channel_wavelength.extend(list(tp.w[mask].to(WAVELENGTH).value))
+                channel_qe.extend(list(qe[mask]))
 
-                # Store wavelength-dependent parameters
-                configuration_by_obs["optics_throughput"][chan_name] = {
-                    "wavelength": ((channel_wavelength * u.nm).to(WAVELENGTH)).value,
-                    "throughput": channel_throughput,
+                spectral = {
+                    "wavelength": np.asarray(channel_wavelength),
+                    "optics_throughput": np.asarray(channel_throughput),
+                    "qe": np.asarray(channel_qe),
+                    "dqe": np.ones_like(np.asarray(channel_qe))
+                    * DEFAULT_DQE,  # hardcoded for now
                 }
-                configuration_by_obs["qe"][chan_name] = {
-                    "wavelength": ((channel_wavelength * u.nm).to(WAVELENGTH)).value,
-                    "qe": channel_qe,
-                }
-
-                configuration_by_obs["dqe"][chan_name] = {
-                    "wavelength": ((channel_wavelength * u.nm).to(WAVELENGTH)).value,
-                    "dqe": np.ones_like(channel_qe) * DEFAULT_DQE,
-                }  # hardcoded for now
 
                 # Retrieve scalar parameters for this channel
                 nav_chan = system.resolve("CI." + chan_name)
 
-                configuration_by_obs["pixscale_mas"][chan_name] = float(
-                    (
-                        nav_chan.Detector.pixel_pitch.v
-                        / nav_chan.focal_length.v
-                        * u.radian
-                    )
-                    .to(u.mas)
-                    .value
-                )
-                configuration_by_obs["dc"][chan_name] = float(
-                    nav_chan.Detector.dark_current.v
-                )  # ct/px/s
-                configuration_by_obs["rn"][chan_name] = float(
-                    nav_chan.Detector.read_noise.v
-                )
-                configuration_by_obs["cic"][chan_name] = float(
-                    nav_chan.Detector.cic.v
-                )  # ct/px
+                configuration_by_obs[chan_name] = {
+                    "pixscale_mas": float(
+                        (
+                            nav_chan.Detector.pixel_pitch.v
+                            / nav_chan.focal_length.v
+                            * u.radian
+                        )
+                        .to(u.mas)
+                        .value
+                    ),
+                    "dc": float(nav_chan.Detector.dark_current.v),  # ct/px/s
+                    "rn": float(nav_chan.Detector.read_noise.v),
+                    "cic": float(nav_chan.Detector.cic.v),  # ct/px
+                    "wavelength_range": (
+                        float(lower_edge.to(WAVELENGTH).value),
+                        float(higher_edge.to(WAVELENGTH).value),
+                    ),
+                    "spectral": spectral,
+                }
 
             hwo_configuration[observation_type] = configuration_by_obs
 
         return hwo_configuration
+
+    def validate_engineering_config(
+        config: dict,
+        eac_keyword: str,
+    ) -> None:
+        """
+        Validate a unified engineering configuration dict (from hwome or eacy).
+
+        Channel names (e.g., "vis"/"nir", or hwome's native channel names) are
+        not hardcoded: each mode ("IMAGER"/"IFS") only needs to define at least
+        one channel, and whatever channels are present get validated.
+
+        Parameters
+        ----------
+        config : dict
+            Unified engineering configuration, as returned by
+            Observatory._ingest_from_hwome or Observatory._convert_eacy_to_unified_format.
+        eac_keyword : str
+            EAC configuration keyword (e.g., "EAC1", "EAC5"), used in error messages.
+
+        Raises
+        ------
+        ValueError
+            If the config is missing required structure, contains invalid data,
+            or is otherwise internally inconsistent (e.g. wavelength_range not
+            matching the channel's actual spectral domain).
+        TypeError
+            If a required field has an incorrect type.
+        """
+
+        def _get_channels(sub: dict, context: str) -> list:
+            """
+            Return the list of channel names present under a mode dict, requiring
+            that at least one channel is defined. Does not assume any specific
+            channel names (e.g. "vis"/"nir") -- whatever is there gets validated.
+            """
+            if not isinstance(sub, dict) or len(sub) == 0:
+                raise ValueError(
+                    f"{context} must define at least one channel (e.g. 'vis', 'nir', or "
+                    f"whatever channel names the ingestion source provides), but got: {sub!r}."
+                )
+            return list(sub.keys())
+
+        def _validate_spectral(
+            spectral: dict,
+            context: str,
+            value_keys: tuple,
+            unity_bounded_keys: set,
+        ) -> np.ndarray:
+            """
+            Validate a channel's "spectral" sub-dict: a single shared "wavelength"
+            array plus one flat array per key in ``value_keys``. Checks presence,
+            matching lengths, finiteness, monotonicity of wavelength, and
+            (for unity-bounded keys) that values lie within [0, 1].
+
+            Returns the wavelength array so callers can reuse it (e.g. to check
+            consistency with a stored wavelength_range).
+            """
+            if "wavelength" not in spectral:
+                raise ValueError(f"{context} missing 'wavelength'.")
+
+            wl = np.asarray(spectral["wavelength"], dtype=float)
+
+            if wl.size == 0:
+                raise ValueError(f"{context} has empty 'wavelength' array.")
+            if not np.all(np.isfinite(wl)):
+                raise ValueError(f"{context}: 'wavelength' contains NaN/Inf values.")
+            if not np.all(np.diff(wl) > 0):
+                raise ValueError(f"{context}: 'wavelength' is not strictly increasing.")
+
+            for val_key in value_keys:
+                if val_key not in spectral:
+                    raise ValueError(f"{context} missing '{val_key}'.")
+
+                val = np.asarray(spectral[val_key], dtype=float)
+
+                if val.size == 0:
+                    raise ValueError(f"{context}: '{val_key}' array is empty.")
+                if val.shape != wl.shape:
+                    raise ValueError(
+                        f"{context}: 'wavelength' (len={wl.size}) and '{val_key}' "
+                        f"(len={val.size}) length mismatch."
+                    )
+                if not np.all(np.isfinite(val)):
+                    raise ValueError(f"{context}: '{val_key}' contains NaN/Inf values.")
+
+                if val_key in unity_bounded_keys:
+                    if val.min() < 0.0 or val.max() > 1.0:
+                        raise ValueError(
+                            f"{context}: '{val_key}' values must lie within [0, 1] "
+                            f"(got min={val.min():.4g}, max={val.max():.4g}). "
+                            f"A value outside this range likely indicates corrupted upstream "
+                            f"data or a units/scaling bug in the ingestion source."
+                        )
+
+            return wl
+
+        def _validate_wavelength_range(
+            wavelength_range,
+            wl: np.ndarray,
+            context: str,
+            rel_tol: float = 1e-6,
+        ) -> None:
+            """
+            Validate that ``wavelength_range`` is a well-formed (min, max) pair,
+            and that it is consistent with the channel's actual discretized
+            "spectral" wavelength domain (wl) -- i.e. wl should lie within
+            [wavelength_range[0], wavelength_range[1]], within a small floating-
+            point tolerance.
+            """
+            if (
+                not isinstance(wavelength_range, (tuple, list))
+                or len(wavelength_range) != 2
+            ):
+                raise ValueError(
+                    f"{context}: 'wavelength_range' must be a 2-element (min, max) "
+                    f"pair, got: {wavelength_range!r}."
+                )
+
+            lo, hi = wavelength_range
+            if not isinstance(lo, (int, float)) or not isinstance(hi, (int, float)):
+                raise TypeError(
+                    f"{context}: 'wavelength_range' elements must be numeric, "
+                    f"got: {wavelength_range!r}."
+                )
+            if not (np.isfinite(lo) and np.isfinite(hi)):
+                raise ValueError(
+                    f"{context}: 'wavelength_range' contains NaN/Inf: {wavelength_range!r}."
+                )
+            if lo >= hi:
+                raise ValueError(
+                    f"{context}: 'wavelength_range' min ({lo}) must be strictly "
+                    f"less than max ({hi})."
+                )
+
+            tol = rel_tol * max(abs(hi), abs(lo), 1.0)
+            if wl.min() < lo - tol or wl.max() > hi + tol:
+                raise ValueError(
+                    f"{context}: 'wavelength_range' = [{lo:.6g}, {hi:.6g}] does not "
+                    f"contain the channel's actual spectral domain "
+                    f"[{wl.min():.6g}, {wl.max():.6g}]. "
+                )
+
+        if config is None:
+            raise ValueError(
+                f"Engineering configuration for '{eac_keyword}' failed to load "
+                f"(hwome and eacy both returned None). Check hwome/eacy availability "
+                f"and HWOME_DATA_PATH."
+            )
+
+        REQUIRED_TOP_LEVEL = {
+            "diameter": (float, int),
+            "temperature": (float, int),
+            "IMAGER": dict,
+            "IFS": dict,
+        }
+
+        # Keys required inside each channel's config (in addition to "spectral")
+        REQUIRED_CHANNEL_SCALAR_KEYS = ["dc", "rn", "cic"]
+
+        # Keys required inside each channel's "spectral" sub-dict
+        REQUIRED_SPECTRAL_VALUE_KEYS = ("optics_throughput", "qe", "dqe")
+
+        # Fields that are physically bounded to [0, 1] (fractional/probability-like quantities)
+        UNITY_BOUNDED_KEYS = {"optics_throughput", "qe", "dqe"}
+
+        # --- top-level keys/types ---
+        for key, expected_type in REQUIRED_TOP_LEVEL.items():
+            if key not in config:
+                raise ValueError(
+                    f"[{eac_keyword}] engineering config missing required key '{key}'."
+                )
+            if not isinstance(config[key], expected_type):
+                raise TypeError(
+                    f"[{eac_keyword}] '{key}' expected {expected_type}, "
+                    f"got {type(config[key])}."
+                )
+
+        if not (0 < config["diameter"] < 100):
+            raise ValueError(
+                f"[{eac_keyword}] 'diameter' = {config['diameter']} m looks unphysical."
+            )
+        if not (0 < config["temperature"] < 1000):
+            raise ValueError(
+                f"[{eac_keyword}] 'temperature' = {config['temperature']} K looks unphysical."
+            )
+
+        # --- per-mode structure ---
+        for mode in ("IMAGER", "IFS"):
+            mode_config = config[mode]
+
+            channels = _get_channels(mode_config, context=f"[{eac_keyword}][{mode}]")
+
+            for chan_name in channels:
+                chan_config = mode_config[chan_name]
+                context = f"[{eac_keyword}][{mode}]['{chan_name}']"
+
+                if not isinstance(chan_config, dict):
+                    raise TypeError(
+                        f"{context} must be a dict, got {type(chan_config)}."
+                    )
+
+                # --- scalar detector parameters ---
+                for skey in REQUIRED_CHANNEL_SCALAR_KEYS:
+                    if skey not in chan_config:
+                        raise ValueError(f"{context} missing required key '{skey}'.")
+                    val = chan_config[skey]
+                    if not isinstance(val, (int, float)) or val < 0:
+                        raise ValueError(
+                            f"{context}['{skey}'] = {val} must be a non-negative number."
+                        )
+
+                # --- pixscale_mas ---
+                if "pixscale_mas" not in chan_config:
+                    raise ValueError(f"{context} missing required key 'pixscale_mas'.")
+                pixscale = chan_config["pixscale_mas"]
+
+                if not isinstance(pixscale, (int, float)) or pixscale <= 0:
+                    raise ValueError(
+                        f"{context}['pixscale_mas'] = {pixscale} must be a "
+                        f"positive number."
+                    )
+
+                # --- wavelength_range + spectral data ---
+                if "spectral" not in chan_config:
+                    raise ValueError(f"{context} missing required key 'spectral'.")
+                if "wavelength_range" not in chan_config:
+                    raise ValueError(
+                        f"{context} missing required key 'wavelength_range'."
+                    )
+
+                wl = _validate_spectral(
+                    chan_config["spectral"],
+                    context=f"{context}['spectral']",
+                    value_keys=REQUIRED_SPECTRAL_VALUE_KEYS,
+                    unity_bounded_keys=UNITY_BOUNDED_KEYS,
+                )
+
+                _validate_wavelength_range(
+                    chan_config["wavelength_range"],
+                    wl,
+                    context=context,
+                )
 
     def load_configuration(
         self, parameters: dict, observation: object, scene: object
@@ -665,29 +893,8 @@ class Observatory(ABC):  # abstract class
             self.active_channel = Observatory._select_active_channel(
                 self.configuration[obs_mode], observation.wavelength_range
             )
-            if self.active_channel is not None:
-                utils.rebin_channel_curves_to_grid(
-                    self.configuration[obs_mode],
-                    self.active_channel,
-                    curve_keys=[
-                        "qe",
-                        "dqe",
-                        "optics_throughput",
-                    ],  # TODO extend to ["dc", "rn", "cic"] once those
-                    # become per-wavelength arrays in the YAML
-                    to_wavelength=observation.wavelength.value,
-                    to_delta_wavelength=(
-                        observation.delta_wavelength.value
-                        if observation.delta_wavelength is not None
-                        else None
-                    ),
-                    interpolation=(
-                        "Gaussian" if observation.delta_wavelength is not None else "1d"
-                    ),
-                )
         else:
             self.active_channel = None
-
         self.telescope.load_configuration(parameters, mediator)
         self.coronagraph.load_configuration(parameters, mediator)
         self.detector.load_configuration(parameters, mediator)
@@ -698,9 +905,7 @@ class Observatory(ABC):  # abstract class
         self.calculate_total_throughput()
 
     @staticmethod
-    def _select_active_channel(
-        mode_config, wavelength_range, quantity_key="optics_throughput"
-    ):
+    def _select_active_channel(mode_config, wavelength_range):
         """
         Determine which single channel's engineering data applies to filter_obj.
 
@@ -708,14 +913,12 @@ class Observatory(ABC):  # abstract class
         ----------
         mode_config : dict
             The per-mode unified configuration dict (e.g. eac_config["IFS"]),
-            containing at least mode_config[quantity_key] = {chan_name: {...}}.
+            mapping chan_name -> channel configuration. Each channel
+            configuration must contain a "wavelength_range" tuple
+            (min, max) in WAVELENGTH's native units, defining the channel's
+            valid native domain.
         wavelength_range : np.array
             The active observation wavelength range.
-        quantity_key : str, optional
-            Which quantity's channel dict to use for the domain check
-            (default "optics_throughput"). Assumes all quantities
-            (optics_throughput, qe, dc, rn, cic) share the same channel names
-            for a given mode_config -- not yet independently validated.
 
         Returns
         -------
@@ -725,35 +928,42 @@ class Observatory(ABC):  # abstract class
         Raises
         ------
         ValueError
-            If filter_obj.channel is set but not present in mode_config, or if
-            no channel (or more than one channel) fully contains the filter's
-            wavelength range.
+            If no channel (or more than one channel) fully contains the
+            filter's wavelength range.
         """
-        available_channels = list(mode_config[quantity_key].keys())
-
         domain_matches = []
-        for chan_name, chan_data in mode_config[quantity_key].items():
-            wl = np.asarray(
-                (chan_data["wavelength"] * u.um).to(WAVELENGTH)
-            )  # in case WAVELENGTH ever changes
-            if wl.size == 0:
-                continue
+        channel_ranges = {}
+        for chan_name, chan_config in mode_config.items():
+            wl_min, wl_max = chan_config["wavelength_range"]
+            channel_ranges[chan_name] = (wl_min, wl_max)
             if (
-                wavelength_range[0].value >= wl.min()
-                and wavelength_range[1].value <= wl.max()
+                wavelength_range[0].value >= wl_min
+                and wavelength_range[1].value <= wl_max
             ):
                 domain_matches.append(chan_name)
 
         if not domain_matches:
+            channel_info = ", ".join(
+                [
+                    f"{name}: [{edges[0]:.3f}, {edges[1]:.3f}]"
+                    for name, edges in channel_ranges.items()
+                ]
+            )
             raise ValueError(
-                f"Wavelength range does not fall "
-                f"entirely within any channel's native wavelength domain: "
-                f"{available_channels}."
+                f"Wavelength range [{wavelength_range[0].value:.3f}, {wavelength_range[1].value:.3f}] does not fall "
+                f"entirely within any channel's native wavelength domain. "
+                f"Available channels: {channel_info}."
             )
         if len(domain_matches) > 1:
+            matching_info = ", ".join(
+                [
+                    f"{name}: [{channel_ranges[name][0]:.3f}, {channel_ranges[name][1]:.3f}]"
+                    for name in domain_matches
+                ]
+            )
             raise ValueError(
-                f"Wavelength range spans multiple "
-                f"channels {domain_matches}. Please define separate filters, "
+                f"Wavelength range [{wavelength_range[0].value:.3f}, {wavelength_range[1].value:.3f}] spans multiple "
+                f"channels: {matching_info}. Please define separate filters, "
                 f"each contained within a single instrument channel."
             )
         return domain_matches[0]
@@ -831,10 +1041,36 @@ class Observatory(ABC):  # abstract class
                 obs_mode = mediator.get_observation_parameter("observing_mode")
                 mode_config = eac_config[obs_mode]
                 active_channel = mediator.get_active_channel()
+                channel_config = mode_config[active_channel]
+
+                # BIN CONFIGURATION DATA TO WAVELENGTH OF INTEREST
+                curve_keys = ["optics_throughput"]
+                rebinned = utils.rebin_channel_curves_to_grid(
+                    channel_config["spectral"],
+                    curve_keys,
+                    to_wavelength=mediator.get_observation_parameter(
+                        "wavelength"
+                    ).value,
+                    to_delta_wavelength=(
+                        mediator.get_observation_parameter("delta_wavelength").value
+                        if mediator.get_observation_parameter("delta_wavelength")
+                        is not None
+                        else None
+                    ),
+                    interpolation=(
+                        "Gaussian"
+                        if mediator.get_observation_parameter("delta_wavelength")
+                        is not None
+                        else "1d"
+                    ),
+                    obs_mode=obs_mode,
+                    wavelength_range=mediator.get_observation_parameter(
+                        "wavelength_range"
+                    ),
+                )
 
                 self.optics_throughput = (
-                    np.asarray(mode_config["optics_throughput"][active_channel])
-                    * DIMENSIONLESS
+                    np.asarray(rebinned["optics_throughput"]) * DIMENSIONLESS
                 )
             else:
                 raise ValueError(

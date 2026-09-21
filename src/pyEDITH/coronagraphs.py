@@ -8,6 +8,7 @@ from yippy import Coronagraph as yippycoro
 from lod_unit import lod
 import logging
 from pyEDITH import parse_input
+import copy
 
 logger = logging.getLogger("pyEDITH")
 
@@ -150,8 +151,6 @@ class Coronagraph(ABC):
         Number of PSF ratios.
     nrolls : int
         Number of roll angles.
-    # coronagraph_optical_throughput: np.ndarray
-    #     Throughput for all coronagraph optics in the optical path
     """
 
     # Keys that a user is NOT allowed to override for this coronagraph mode.
@@ -199,7 +198,6 @@ class Coronagraph(ABC):
             "coronagraph_bandwidth": float,
             "npsfratios": int,
             "nrolls": int,
-            # "coronagraph_optical_throughput": DIMENSIONLESS,
             "coronagraph_spectral_resolution": DIMENSIONLESS,
         }
 
@@ -251,7 +249,6 @@ class ToyModelCoronagraph(Coronagraph):
         * DIMENSIONLESS,  # core throughput of coronagraph (uniform over dark hole, unitless, scalar)
         "TLyot": 0.65 * DIMENSIONLESS,  # Lyot transmission of the coronagraph
         "nrolls": 1,  # number of rolls
-        # "coronagraph_optical_throughput": [0.44]
         # * DIMENSIONLESS,  # Coronagraph throughput [made up from EAC1-ish]
         "coronagraph_spectral_resolution": 1
         * DIMENSIONLESS,  # Set to default. It is used to limit the bandwidth if the coronagraph has a specific spectral window.
@@ -267,6 +264,7 @@ class ToyModelCoronagraph(Coronagraph):
             Path to configuration files (not used in toy model)
         """
         self.path = path
+        self.DEFAULT_CONFIG = copy.deepcopy(self.DEFAULT_CONFIG)
 
     def load_configuration(self, parameters: dict, mediator: object) -> None:
         """
@@ -292,7 +290,6 @@ class ToyModelCoronagraph(Coronagraph):
         )
 
         # # Convert to numpy array when appropriate
-        # array_params = ["coronagraph_optical_throughput"]
         # utils.convert_to_numpy_array(self, array_params)
 
         # Derived parameters
@@ -450,6 +447,7 @@ class CoronagraphYIP(Coronagraph):
 
         self.path = path
         self.yippy_coro = yippy_coro
+        self.DEFAULT_CONFIG = copy.deepcopy(self.DEFAULT_CONFIG)
 
     def load_configuration(self, parameters: dict, mediator: object) -> None:
         """

@@ -4,9 +4,7 @@ from . import utils
 import astropy.units as u
 from .units import *
 from pyEDITH import parse_input
-import logging
-
-logger = logging.getLogger("pyEDITH")
+import copy
 
 
 class Telescope(ABC):
@@ -26,8 +24,6 @@ class Telescope(ABC):
         Fixed overhead time in seconds.
     toverhead_multi : float
         Multiplicative overhead time.
-    telescope_optical_throughput : numpy.ndarray
-        Array of throughput values.
     temperature : float
         Temperature of the warm optics.
     T_contamination : float
@@ -70,7 +66,6 @@ class Telescope(ABC):
             "Area": LENGTH**2,
             "toverhead_fixed": TIME,
             "toverhead_multi": DIMENSIONLESS,
-            # "telescope_optical_throughput": DIMENSIONLESS,
             "temperature": TEMPERATURE,
             "T_contamination": DIMENSIONLESS,
         }
@@ -113,13 +108,12 @@ class ToyModelTelescope(Telescope):
         "unobscured_area": (1.0 - 0.121),  # unobscured area (percentage,scalar)
         "toverhead_fixed": 8.25e3 * TIME,  # fixed overhead time (seconds,scalar)
         "toverhead_multi": 1.1 * DIMENSIONLESS,  # multiplicative overhead time (scalar)
-        # "telescope_optical_throughput": [0.823]
         # * DIMENSIONLESS,  # Optical throughput (nlambda array) [made up from EAC1-ish]
         "temperature": 290 * TEMPERATURE,
         "T_contamination": 0.95 * DIMENSIONLESS,
     }
 
-    def __init__(self, path: str = None, keyword: str = None):
+    def __init__(self, path: str = None, keyword: str = "ToyModel"):
         """
         Initialize a ToyModelTelescope instance.
 
@@ -133,6 +127,7 @@ class ToyModelTelescope(Telescope):
 
         self.path = path
         self.keyword = keyword
+        self.DEFAULT_CONFIG = copy.deepcopy(self.DEFAULT_CONFIG)
 
     def load_configuration(self, parameters: dict, mediator: object) -> None:
         """
@@ -155,14 +150,6 @@ class ToyModelTelescope(Telescope):
 
         # Load parameters, use defaults if not provided
         utils.fill_parameters(self, parameters, self.DEFAULT_CONFIG, self.LOCKED_KEYS)
-
-        # # Convert to numpy array when appropriate
-        # array_params = [
-        #     "telescope_optical_throughput",
-        # ]
-        # # TODO rebin at new wavelength
-
-        # utils.convert_to_numpy_array(self, array_params)
 
         # Derived parameters
         # effective collecting area of telescope (m^2) # scalar
@@ -194,7 +181,6 @@ class EACTelescope(Telescope):
         "unobscured_area",
         "T_contamination",
         "temperature",
-        # "telescope_optical_throughput",
     }
 
     DEFAULT_CONFIG = {
@@ -204,7 +190,6 @@ class EACTelescope(Telescope):
         * TIME,  # fixed overhead time (seconds,scalar) ### NOTE default for now
         "toverhead_multi": 1.1
         * DIMENSIONLESS,  # multiplicative overhead time (scalar) ### NOTE default for now
-        # "telescope_optical_throughput": None,  # Optical throughput (nlambda array)
         "T_contamination": 1.0
         * DIMENSIONLESS,  # Effective throughput factor to budget for contamination; NOTE: missing from YAML files
         "temperature": None,  # (now a variable)
@@ -224,6 +209,7 @@ class EACTelescope(Telescope):
 
         self.path = path
         self.keyword = keyword
+        self.DEFAULT_CONFIG = copy.deepcopy(self.DEFAULT_CONFIG)
 
     def load_configuration(self, parameters: dict, mediator: object) -> None:
         """
@@ -255,7 +241,7 @@ class EACTelescope(Telescope):
         eac_config = mediator.get_eac_configuration()
 
         # For EAC telescopes, configuration must be available
-        if self.keyword.startswith("EAC") and eac_config is None:
+        if eac_config is None:
             raise RuntimeError(
                 f"Failed to load EAC configuration for {self.keyword}. "
                 f"Cannot proceed with telescope initialization."

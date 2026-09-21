@@ -19,16 +19,24 @@ from pyEDITH.units import (
     FRAME,
 )
 
+
 # ============================================================================
 # Mock Objects and Fixtures
 # ============================================================================
-
-
 class MockMediator:
     """Mock mediator for testing detector configurations."""
 
-    def __init__(self, observing_mode="IMAGER"):
+    def __init__(
+        self,
+        observing_mode="IMAGER",
+        eac_config=None,
+        active_channel=None,
+        delta_wavelength=None,
+    ):
         self.observing_mode = observing_mode
+        self._eac_config = eac_config
+        self._active_channel = active_channel
+        self._delta_wavelength = delta_wavelength
 
     def get_scene_parameter(self, param):
         if param == "stellar_radius":
@@ -41,151 +49,67 @@ class MockMediator:
         return 1.0
 
     def get_observation_parameter(self, param):
+        if param == "observing_mode":
+            return self.observing_mode
         if param == "wavelength":
             if self.observing_mode == "IFS":
                 return np.array([0.5, 0.7, 1.2]) * WAVELENGTH
-            elif self.observing_mode == "IMAGER":
-                return np.array([0.5]) * WAVELENGTH
-        elif param == "wavelength_range":
+            return np.array([0.5]) * WAVELENGTH
+        if param == "wavelength_range":
             if self.observing_mode == "IFS":
                 return np.array([0.5, 1.2]) * WAVELENGTH
-            elif self.observing_mode == "IMAGER":
-                return np.array([0.5 * (1 - 0.2 / 2), 0.5 * (1 + 0.2 / 2)]) * WAVELENGTH
-        elif param == "observing_mode":
-            return self.observing_mode
-        return 1.0
-
-    def get_coronagraph_parameter(self, param):
-        if param == "bandwidth":
-            return 0.2
+            return np.array([0.45, 0.55]) * WAVELENGTH
+        if param == "delta_wavelength":
+            return self._delta_wavelength
         return 1.0
 
     def get_eac_configuration(self):
-        # Return None - tests use ToyModel
-        return None
+        return self._eac_config
+
+    def get_active_channel(self):
+        return self._active_channel
 
 
 @pytest.fixture
-def mock_instrument():
-    """Fixture providing a mock instrument object for EAC detector testing."""
-    mock = MagicMock()
-    mock.lam = [0.5, 1.5] * u.um
+def fake_eac_config():
+    """Minimal unified EAC configuration dict, matching hwome/eacy output shape."""
+    spectral_imager = {
+        "wavelength": np.array([0.4, 0.5, 0.6]),
+        "optics_throughput": np.array([0.8, 0.8, 0.8]),
+        "qe": np.array([0.9, 0.9, 0.9]),
+        "dqe": np.array([0.75, 0.75, 0.75]),
+    }
+    spectral_ifs = {
+        "wavelength": np.array([0.5, 0.7, 0.9, 1.1, 1.2]),
+        "optics_throughput": np.array([0.8, 0.8, 0.8, 0.8, 0.8]),
+        "qe": np.array([0.9, 0.9, 0.9, 0.9, 0.9]),
+        "dqe": np.array([0.75, 0.75, 0.75, 0.75, 0.75]),
+    }
 
-    array_length = 2
-    default_array = np.linspace(0.359, 0.988, array_length)
-
-    mock.__dict__.update(
-        {
-            "verbose": False,
-            "lam": mock.lam,
-            "OP_full": [
-                "PM",
-                "SM",
-                "TCA",
-                "wave_beamsplitter",
-                "pol_beamsplitter",
-                "FSM",
-                "OAPs_forward",
-                "DM1",
-                "DM2",
-                "Fold",
-                "OAPs_back",
-                "Apodizer",
-                "Focal_Plane_Mask",
-                "Lyot_Stop",
-                "Field_Stop",
-                "filters",
-                "Detector",
-            ],
-            "OP_tele": ["PM", "SM"],
-            "OP_inst": [
-                "TCA",
-                "wave_beamsplitter",
-                "pol_beamsplitter",
-                "FSM",
-                "OAPs_forward",
-                "DM1",
-                "DM2",
-                "Fold",
-                "OAPs_back",
-                "Apodizer",
-                "Focal_Plane_Mask",
-                "Lyot_Stop",
-                "Field_Stop",
-                "filters",
-            ],
-            "OP_det": ["Detector"],
-            "TCA": default_array,
-            "wb_tran": np.concatenate([np.zeros(5), np.ones(5)]),
-            "wb_refl": np.concatenate([np.ones(5), np.zeros(5)]),
-            "wave_beamsplitter": np.ones(array_length),
-            "pol_beamsplitter": np.ones(array_length),
-            "FSM": default_array,
-            "OAPs_forward": default_array,
-            "DM1": default_array,
-            "DM2": default_array,
-            "Fold": default_array,
-            "OAPs_back": default_array,
-            "Apodizer": np.full(array_length, 0.95),
-            "Focal_Plane_Mask": np.linspace(0.91, 0.89, array_length),
-            "Lyot_Stop": default_array,
-            "Field_Stop": np.linspace(0.91, 0.89, array_length),
-            "filters": np.ones(array_length),
-            "total_inst_refl": np.full(array_length, 0.7),
-        }
-    )
-
-    return mock
-
-
-@pytest.fixture
-def mock_detector():
-    """Fixture factory for creating mock detector objects for different observing modes."""
-
-    def _create_mock(detector_type):
-        mock = MagicMock()
-
-        mock.lam = np.array([0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8]) * u.um
-        mock.verbose = False
-
-        qe_vis = np.array([0.9, 0.9, 0.9, 0.9, 0.9, np.nan, np.nan, np.nan, np.nan])
-        qe_nir = np.array(
-            [np.nan, np.nan, np.nan, np.nan, np.nan, 0.85, 0.85, 0.85, 0.85]
-        )
-
-        common_dict = {
-            "lam": mock.lam,
-            "verbose": False,
-            "qe_vis": qe_vis,
-            "dc_vis": 3e-05,
-            "cic_vis": None,
-            "qe_nir": qe_nir,
-            "dc_nir": 0.0001,
-            "cic_nir": None,
-        }
-
-        if detector_type == "IMAGER":
-            mock.__dict__.update(
-                {
-                    **common_dict,
-                    "rn_vis": 0.1,
-                    "rn_nir": 0.3,
-                }
-            )
-        elif detector_type == "IFS":
-            mock.__dict__.update(
-                {
-                    **common_dict,
-                    "rn_vis": 0.0,
-                    "rn_nir": 0.4,
-                }
-            )
-        else:
-            raise ValueError(f"Unknown detector type: {detector_type}")
-
-        return mock
-
-    return _create_mock
+    return {
+        "diameter": 8.0,  # must match telescope diameter (in meters) to avoid pixscale recompute warning
+        "temperature": 290.0,
+        "IMAGER": {
+            "VIS": {
+                "pixscale_mas": 10.0,
+                "dc": 3e-5,
+                "rn": 0.1,
+                "cic": 0.0,
+                "wavelength_range": (0.45, 0.55),
+                "spectral": spectral_imager,
+            },
+        },
+        "IFS": {
+            "VIS": {
+                "pixscale_mas": 10.0,
+                "dc": 3e-5,
+                "rn": 0.1,
+                "cic": 0.0,
+                "wavelength_range": (0.5, 1.2),
+                "spectral": spectral_ifs,
+            },
+        },
+    }
 
 
 @pytest.fixture
@@ -240,7 +164,7 @@ def test_toy_model_detector_init():
     detector = ToyModelDetector()
 
     assert detector.path is None
-    assert detector.keyword is None
+    assert detector.keyword is "ToyModel"
 
 
 # ============================================================================
@@ -329,29 +253,23 @@ def test_toy_model_detector_load_configuration_ifs_defaults():
 # # ============================================================================
 # # Tests for EACDetector.load_configuration - IMAGER mode
 # # ============================================================================
-
-
-@patch("eacy.load_detector")
-@patch("eacy.load_instrument")
 def test_eac_detector_load_configuration_imager_basic(
-    mock_load_instrument,
-    mock_load_detector,
-    mock_instrument,
-    mock_detector,
+    fake_eac_config,
     imager_eac_detector_parameters,
 ):
     """Test basic EACDetector configuration loading in IMAGER mode."""
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_detector.return_value = mock_detector("IMAGER")
     parameters = imager_eac_detector_parameters.copy()
-    detector = EACDetector()
-    mediator = MockMediator("IMAGER")
+    detector = EACDetector(keyword="EAC1")
+    mediator = MockMediator(
+        "IMAGER",
+        eac_config=fake_eac_config,
+        active_channel="VIS",
+    )
 
     detector.load_configuration(parameters, mediator)
 
     assert detector.pixscale_mas is not None
     assert detector.npix_multiplier == 1 * DIMENSIONLESS
-
     assert detector.DC.unit == DARK_CURRENT
     assert detector.RN.unit == READ_NOISE
     assert detector.tread.unit == READ_TIME
@@ -363,33 +281,25 @@ def test_eac_detector_load_configuration_imager_basic(
     assert detector.RN.shape == expected_shape
     assert detector.QE.shape == expected_shape
 
-    assert np.allclose(detector.DC.value, 3e-05)  # vis channel
-    assert np.allclose(detector.RN.value, 0.1)  # vis channel
-    assert np.allclose(detector.QE.value, 0.9)  # vis channel
-    assert np.allclose(detector.dQE.value, 0.75)  # hardcoded
-
 
 # ============================================================================
 # Tests for EACDetector.load_configuration - IFS mode
 # ============================================================================
 
 
-@patch("eacy.load_detector")
-@patch("eacy.load_instrument")
 def test_eac_detector_load_configuration_ifs_basic(
-    mock_load_instrument,
-    mock_load_detector,
-    mock_instrument,
-    mock_detector,
+    fake_eac_config,
     ifs_eac_detector_parameters,
 ):
     """Test basic EACDetector configuration loading in IFS mode."""
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_detector.return_value = mock_detector("IFS")
 
-    detector = EACDetector()
+    detector = EACDetector(keyword="EAC1")
     parameters = ifs_eac_detector_parameters.copy()
-    mediator = MockMediator("IFS")
+    mediator = MockMediator(
+        "IFS",
+        eac_config=fake_eac_config,
+        active_channel="VIS",
+    )
 
     detector.load_configuration(parameters, mediator)
 
@@ -408,14 +318,6 @@ def test_eac_detector_load_configuration_ifs_basic(
     assert detector.QE.shape == expected_shape
     assert detector.CIC.shape == expected_shape
 
-    # VIS wavelengths (< 1 μm)
-    assert np.allclose(detector.DC[:2].value, 3e-05)
-    assert np.allclose(detector.RN[:2].value, 0.0)
-
-    # NIR wavelengths (>= 1 μm)
-    assert np.allclose(detector.DC[2:].value, 0.0001)
-    assert np.allclose(detector.RN[2:].value, 0.4)
-
 
 # # ============================================================================
 # # Tests for EACDetector validation inputs
@@ -424,11 +326,18 @@ def test_eac_detector_load_configuration_ifs_basic(
 
 @pytest.mark.parametrize("observing_mode", ["IMAGER", "IFS"])
 def test_eac_detector_etc_validation_inputs(
-    observing_mode, ifs_eac_detector_parameters, imager_eac_detector_parameters
+    observing_mode,
+    fake_eac_config,
+    ifs_eac_detector_parameters,
+    imager_eac_detector_parameters,
 ):
     """Test that ETC validation inputs are correctly loaded."""
-    detector = EACDetector()
-    mediator = MockMediator(observing_mode)
+    detector = EACDetector(keyword="EAC1")
+    mediator = MockMediator(
+        observing_mode,
+        eac_config=fake_eac_config,
+        active_channel="VIS",
+    )
     parameters = (
         imager_eac_detector_parameters
         if observing_mode == "IMAGER"
@@ -443,6 +352,178 @@ def test_eac_detector_etc_validation_inputs(
     assert hasattr(detector, "det_npix_input")
     assert detector.t_photon_count_input == 0.7 * SECOND / FRAME
     assert np.allclose(detector.det_npix_input, 200 * DIMENSIONLESS)
+
+
+# ============================================================================
+# Regression tests for the DEFAULT_CONFIG shared-mutable-class-attribute fix
+# ============================================================================
+
+
+def test_toy_model_detector_default_config_not_shared_class_attribute():
+    """Direct identity check: self.DEFAULT_CONFIG must be a distinct object
+    from the class-level dict immediately after __init__, and mutating one
+    instance's copy must not affect the class attribute or sibling
+    instances. This works regardless of load_configuration() internals."""
+    detector = ToyModelDetector()
+
+    assert detector.DEFAULT_CONFIG is not ToyModelDetector.DEFAULT_CONFIG
+
+    detector.DEFAULT_CONFIG["DC"] = [999.0] * DARK_CURRENT
+
+    other = ToyModelDetector()
+    assert ToyModelDetector.DEFAULT_CONFIG["DC"] == [3e-5] * DARK_CURRENT
+    assert other.DEFAULT_CONFIG["DC"] == [3e-5] * DARK_CURRENT
+
+
+def test_toy_model_detector_default_config_leak_ifs_then_imager():
+    """True reproduction of the originally reported bug: an IFS-mode
+    instance (nlambda=3) run BEFORE an IMAGER-mode instance (nlambda=1),
+    where NEITHER instance supplies the array-valued keys explicitly --
+    both rely on parse_input.normalize_list_shapes() resizing
+    DEFAULT_CONFIG's hardcoded scalar defaults to the current wavelength
+    grid length.
+
+    Before the copy.deepcopy() fix, the IFS call would resize the *shared
+    class-level* DEFAULT_CONFIG arrays up to length 3; the later IMAGER
+    call would then find DEFAULT_CONFIG already at length 3 and fail to
+    shrink it back to length 1 (matching the reported
+    "DC has length 3 but the expected input size is 1" error).
+    """
+    mediator_ifs = MockMediator("IFS")
+    detector_ifs = ToyModelDetector()
+    detector_ifs.load_configuration(
+        {
+            "wavelength": mediator_ifs.get_observation_parameter("wavelength"),
+            "observing_mode": "IFS",
+        },  # array_params keys deliberately omitted
+        mediator_ifs,
+    )
+
+    mediator_imager = MockMediator("IMAGER")
+    detector_imager = ToyModelDetector()
+    detector_imager.load_configuration(
+        {
+            "wavelength": mediator_imager.get_observation_parameter("wavelength"),
+            "observing_mode": "IMAGER",
+        },  # array_params keys deliberately omitted
+        mediator_imager,
+    )
+
+    n_ifs = len(mediator_ifs.get_observation_parameter("wavelength"))
+    n_imager = len(mediator_imager.get_observation_parameter("wavelength"))
+
+    assert detector_ifs.DC.shape == (n_ifs,)
+    assert detector_imager.DC.shape == (n_imager,)  # would be (n_ifs,) if leaking
+
+    # class-level dict must remain at its original, un-resized hardcoded default
+    assert len(ToyModelDetector.DEFAULT_CONFIG["DC"]) == 1
+
+
+def test_eac_detector_default_config_not_shared_class_attribute():
+    """Direct identity check for EACDetector. Unlike ToyModelDetector,
+    EACDetector's load_configuration() never resizes a *stale* previous
+    value -- every array key (QE, dQE, DC, RN, CIC, pixscale_mas) is
+    unconditionally recomputed fresh from the current call's eac_config/
+    active_channel/wavelength grid, and `tread`'s shape always comes from
+    the current call's wavelength array too. So there is no length-leak
+    symptom to reproduce via load_configuration() the way there is for
+    ToyModelDetector -- this identity check is the only test capable of
+    actually discriminating the fix for this class."""
+    detector = EACDetector(keyword="EAC1")
+
+    assert detector.DEFAULT_CONFIG is not EACDetector.DEFAULT_CONFIG
+
+    detector.DEFAULT_CONFIG["DC"] = [999.0] * DARK_CURRENT
+
+    other = EACDetector(keyword="EAC2")
+    assert EACDetector.DEFAULT_CONFIG["DC"] is None
+    assert other.DEFAULT_CONFIG["DC"] is None
+
+
+# ============================================================================
+# Correctness test (NOT a regression test for the shared-mutable-attribute
+# bug -- see test_eac_detector_default_config_not_shared_class_attribute
+# above for that). This just confirms two EACDetector instances loaded with
+# different eac_configs/active_channels produce independent, correct
+# attribute values. Since EACDetector always unconditionally recomputes its
+# array-valued keys from fresh data each call, this test would pass even
+# without the copy.deepcopy() fix -- it's kept for general correctness
+# coverage, not bug-regression coverage.
+# ============================================================================
+
+
+def test_eac_detector_load_configuration_independent_per_call():
+    """Two EACDetector instances loaded with different eac_configs produce
+    independent, correct pixscale_mas/DC/RN/CIC/QE/dQE values."""
+
+    eac_config_1 = {
+        "diameter": 8.0,
+        "temperature": 290.0,
+        "IMAGER": {
+            "vis": {
+                "dc": 3e-5,
+                "rn": 0.1,
+                "cic": 0.0,
+                "pixscale_mas": 10.0,
+                "wavelength_range": (0.4, 0.6),
+                "spectral": {
+                    "wavelength": np.array([0.4, 0.5, 0.6]),
+                    "optics_throughput": np.array([0.8, 0.8, 0.8]),
+                    "qe": np.array([0.9, 0.9, 0.9]),
+                    "dqe": np.array([0.75, 0.75, 0.75]),
+                },
+            }
+        },
+        "IFS": {},
+    }
+
+    eac_config_2 = {
+        "diameter": 8.0,
+        "temperature": 290.0,
+        "IMAGER": {
+            "vis": {
+                "dc": 6e-5,
+                "rn": 0.5,
+                "cic": 1.0,
+                "pixscale_mas": 25.0,
+                "wavelength_range": (0.4, 0.6),
+                "spectral": {
+                    "wavelength": np.array([0.4, 0.5, 0.6]),
+                    "optics_throughput": np.array([0.7, 0.7, 0.7]),
+                    "qe": np.array([0.5, 0.5, 0.5]),
+                    "dqe": np.array([0.6, 0.6, 0.6]),
+                },
+            }
+        },
+        "IFS": {},
+    }
+
+    mediator1 = MockMediator("IMAGER", eac_config=eac_config_1, active_channel="vis")
+    detector1 = EACDetector(keyword="EAC1")
+    detector1.load_configuration(
+        {"wavelength": 0.5, "observing_mode": "IMAGER"}, mediator1
+    )
+
+    mediator2 = MockMediator("IMAGER", eac_config=eac_config_2, active_channel="vis")
+    detector2 = EACDetector(keyword="EAC2")
+    detector2.load_configuration(
+        {"wavelength": 0.5, "observing_mode": "IMAGER"}, mediator2
+    )
+
+    # Instance-level values must reflect their own eac_config, not leak from the other
+    assert np.isclose(detector1.pixscale_mas.value, 10.0)
+    assert np.all(detector1.DC.value == 3e-5)
+    assert np.all(detector1.RN.value == 0.1)
+    assert np.all(detector1.CIC.value == 0.0)
+    assert np.all(detector1.QE.value == 0.9)
+    assert np.all(detector1.dQE.value == 0.75)
+
+    assert np.isclose(detector2.pixscale_mas.value, 25.0)
+    assert np.all(detector2.DC.value == 6e-5)
+    assert np.all(detector2.RN.value == 0.5)
+    assert np.all(detector2.CIC.value == 1.0)
+    assert np.all(detector2.QE.value == 0.5)
+    assert np.all(detector2.dQE.value == 0.6)
 
 
 # ============================================================================

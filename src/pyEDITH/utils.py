@@ -938,59 +938,98 @@ def resample_to_wavelength_grid(
 
 
 def rebin_channel_curves_to_grid(
-    mode_config: dict,
-    active_channel: str,
+    spectral: dict,
     curve_keys: list,
     to_wavelength: np.ndarray,
     to_delta_wavelength: np.ndarray = None,
     interpolation: str = "1d",
-) -> None:
+    obs_mode: str = "IMAGER",  # temporary
+    wavelength_range: list = [0.1, 0.2],  # temporary
+) -> dict:
     """
     Rebin channel-native engineering curves onto the resolved observation
-    wavelength grid, once, in place.
+    wavelength grid.
 
-    For each key in ``curve_keys``, ``mode_config[key][active_channel]`` is
-    expected to be either:
-      - a dict ``{"wavelength": [...], <value_key>: [...]}`` on its own
-        native (typically much higher-resolution) grid -- this gets sorted,
-        deduplicated, and rebinned, then replaced by a plain array; or
-      - already a plain scalar/array (e.g. current single-float dc/rn/cic) --
-        left untouched, since there's nothing to regrid.
+    ``spectral`` is expected to be the per-channel spectral sub-dictionary
+    of the unified EAC configuration, i.e.
+    ``eac_config[obs_mode][active_channel]["spectral"]``, containing a single
+    shared ``"wavelength"`` array plus one flat value array per curve
+    (e.g. ``"qe"``, ``"dqe"``, ``"optics_throughput"``), all on the same
+    native (typically much higher-resolution) grid.
+
+    For each key in ``curve_keys`` found in ``spectral``:
+      - If ``obs_mode == "IMAGER"`` (temporary behavior), the curve is
+        collapsed to a single bandpass-averaged value via
+        ``average_over_bandpass`` and used as-is (no further resampling).
+      - Otherwise, the array is sorted, deduplicated, and rebinned onto
+        ``to_wavelength`` via ``resample_to_wavelength_grid``.
+
+    Keys not present in ``spectral`` are skipped (e.g. scalar detector
+    parameters like ``dc``/``rn``/``cic``, which live outside ``spectral``
+    and are used as-is without rebinning).
 
     Parameters
     ----------
-    mode_config : dict
-        The observing-mode sub-dictionary of the unified EAC configuration,
-        i.e. ``self.configuration[obs_mode]``.
-    active_channel : str
-        The channel selected by ``_select_active_channel``.
+    spectral : dict
+        The per-channel spectral sub-dictionary, i.e.
+        ``eac_config[obs_mode][active_channel]["spectral"]``. Must contain a
+        ``"wavelength"`` key shared by all curves, plus one array per curve
+        key requested in ``curve_keys``.
     curve_keys : list of str
-        Which top-level keys to rebin (e.g. ``["qe"]``, later
-        ``["qe", "dc", "rn", "cic"]``).
+        Which keys within ``spectral`` to rebin (e.g. ``["qe", "dqe"]``).
     to_wavelength : np.ndarray
         Target wavelength grid, plain array (e.g. ``observation.wavelength.value``).
     to_delta_wavelength : np.ndarray, optional
         Bin widths of the target grid; required only for Gaussian interpolation.
     interpolation : str
         "1d" or "Gaussian", passed through to ``resample_to_wavelength_grid``.
+
+    Returns
+    -------
+    dict
+        Mapping of curve key -> rebinned array on the ``to_wavelength`` grid
+        (or bandpass-averaged single-value array, in the temporary IMAGER path).
     """
+    if interpolation == "Gaussian" and to_delta_wavelength is None:
+        raise ValueError(
+            "to_delta_wavelength must be provided when interpolation='Gaussian'."
+        )
+
+    rebinned = {}
+
+    if "wavelength" not in spectral:
+        logger.debug(
+            "No 'wavelength' array found in spectral data. Skipping all curves."
+        )
+        return rebinned
+
+    wavelengths_native = np.asarray(spectral["wavelength"], dtype=np.float64)
+
     for key in curve_keys:
-        if key not in mode_config or active_channel not in mode_config[key]:
+        if key not in spectral:
             logger.debug(f"{key} was not found in YAML files. Skipping...")
             continue  # key was not found
 
-        chan_data = mode_config[key][active_channel]
+        wavelengths = wavelengths_native
+        values = np.asarray(spectral[key], dtype=np.float64)
 
-        # Already a plain scalar/array (nothing to regrid) -- skip.
-        if not isinstance(chan_data, dict):
+        if (
+            obs_mode == "IMAGER"
+        ):  # temporary, to reproduce past behavior (will be replaced once we implement new feature)
+            rebinned[key] = [
+                average_over_bandpass(
+                    {
+                        "lam": wavelengths * WAVELENGTH,
+                        "value": values,
+                    },
+                    wavelength_range,
+                )["value"]
+            ]
             logger.debug(
-                f"{key} is a scalar and cannot be rebinned to wavelength grid. Skipping..."
+                f"Bandpass-averaged '{key}' over {wavelength_range} "
+                f"(IMAGER temporary path); skipping resampling."
             )
-            continue
-
-        wavelengths = np.asarray(chan_data["wavelength"], dtype=np.float64)
-        value_key = next(k for k in chan_data if k != "wavelength")
-        values = np.asarray(chan_data[value_key], dtype=np.float64)
+            continue  # skip resampling below; bandpass average is final for IMAGER
 
         if wavelengths.size > 1:
             sorted_idx = np.argsort(wavelengths)
@@ -1000,21 +1039,20 @@ def rebin_channel_curves_to_grid(
             wavelengths = wavelengths[unique_idx]
             values = values[unique_idx]
 
-        rebinned = resample_to_wavelength_grid(
+        rebinned[key] = resample_to_wavelength_grid(
             values,
             from_wavelength=(wavelengths * u.um).to(
                 WAVELENGTH
             ),  # in case wavelength ever changes units
             to_wavelength=to_wavelength,
             to_delta_wavelength=to_delta_wavelength,
-            name=f"{key}[{active_channel}]",
+            name=f"{key}",
             interpolation=interpolation,
         )
 
         logger.debug(
-            f"Rebinned '{key}' for channel '{active_channel}' from "
-            f"{wavelengths.size} native points to {len(to_wavelength)} "
-            f"grid points."
+            f"Rebinned '{key}' from {wavelengths.size} native points to "
+            f"{len(to_wavelength)} grid points."
         )
 
-        mode_config[key][active_channel] = rebinned
+    return rebinned

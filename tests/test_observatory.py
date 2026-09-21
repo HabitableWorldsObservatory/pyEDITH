@@ -56,9 +56,6 @@ def create_mock_telescope():
     mock_tel.toverhead_fixed = 8381.3 * TIME
     mock_tel.toverhead_multi = 1.1 * DIMENSIONLESS
 
-    # Optical properties (nlambda=1 for IMAGER mode)
-    mock_tel.telescope_optical_throughput = np.array([0.823]) * DIMENSIONLESS
-
     # Thermal properties
     mock_tel.temperature = 290.0 * TEMPERATURE
     mock_tel.T_contamination = 0.95 * DIMENSIONLESS
@@ -107,7 +104,6 @@ def create_mock_coronagraph():
     mock_coro.npsfratios = 1
 
     # Coronagraph optical properties
-    mock_coro.coronagraph_optical_throughput = np.array([0.44]) * DIMENSIONLESS
     mock_coro.coronagraph_spectral_resolution = 1.0 * DIMENSIONLESS
 
     # Parameters
@@ -170,6 +166,7 @@ def mock_observatory():
     obs.telescope = create_mock_telescope()
     obs.detector = create_mock_detector()
     obs.coronagraph = create_mock_coronagraph()
+    obs.configuration = None
     return obs
 
 
@@ -630,6 +627,244 @@ def test_create_coronagraph_error_provides_solutions(
 
 
 # ============================================================================
+# Tests for Observatory._select_active_channel
+# ============================================================================
+
+
+def test_select_active_channel_single_match():
+    """Test that the one channel fully containing the wavelength range is selected."""
+    mode_config = {
+        "vis": {"wavelength_range": (0.4, 0.6)},
+        "nir": {"wavelength_range": (0.9, 1.8)},
+    }
+    wavelength_range = u.Quantity([0.45, 0.55], u.micron)
+
+    result = Observatory._select_active_channel(mode_config, wavelength_range)
+
+    assert result == "vis"
+
+
+def test_select_active_channel_no_match_raises():
+    """Test that ValueError is raised when no channel fully contains the range."""
+    mode_config = {
+        "vis": {"wavelength_range": (0.4, 0.6)},
+        "nir": {"wavelength_range": (0.9, 1.8)},
+    }
+    wavelength_range = u.Quantity([0.7, 0.8], u.micron)
+
+    with pytest.raises(ValueError, match="does not fall entirely within"):
+        Observatory._select_active_channel(mode_config, wavelength_range)
+
+
+def test_select_active_channel_multiple_matches_raises():
+    """Test that ValueError is raised when more than one channel contains the range."""
+    mode_config = {
+        "a": {"wavelength_range": (0.4, 1.0)},
+        "b": {"wavelength_range": (0.3, 1.2)},
+    }
+    wavelength_range = u.Quantity([0.45, 0.55], u.micron)
+
+    with pytest.raises(ValueError, match="spans multiple"):
+        Observatory._select_active_channel(mode_config, wavelength_range)
+
+
+# ============================================================================
+# Tests for Observatory.validate_engineering_config
+# ============================================================================
+
+
+def _minimal_valid_channel():
+    return {
+        "dc": 3e-5,
+        "rn": 0.1,
+        "cic": 0.0,
+        "pixscale_mas": 10.0,
+        "wavelength_range": (0.4, 0.6),
+        "spectral": {
+            "wavelength": np.array([0.4, 0.5, 0.6]),
+            "optics_throughput": np.array([0.8, 0.8, 0.8]),
+            "qe": np.array([0.9, 0.9, 0.9]),
+            "dqe": np.array([0.75, 0.75, 0.75]),
+        },
+    }
+
+
+def _minimal_valid_config():
+    return {
+        "diameter": 8.0,
+        "temperature": 290.0,
+        "IMAGER": {"vis": _minimal_valid_channel()},
+        "IFS": {"vis": _minimal_valid_channel()},
+    }
+
+
+def test_validate_engineering_config_valid():
+    """Test that a well-formed config passes without raising."""
+    Observatory.validate_engineering_config(_minimal_valid_config(), "EAC1")
+
+
+def test_validate_engineering_config_none_raises():
+    """Test that a None config raises ValueError."""
+    with pytest.raises(ValueError, match="failed to load"):
+        Observatory.validate_engineering_config(None, "EAC1")
+
+
+def test_validate_engineering_config_missing_top_level_key():
+    """Test that a missing top-level key raises ValueError."""
+    config = _minimal_valid_config()
+    del config["temperature"]
+
+    with pytest.raises(ValueError, match="missing required key 'temperature'"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_wrong_type_top_level_key():
+    """Test that a top-level key with the wrong type raises TypeError."""
+    config = _minimal_valid_config()
+    config["IMAGER"] = "not_a_dict"
+
+    with pytest.raises(TypeError, match="expected"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_bad_diameter():
+    """Test that an unphysical diameter raises ValueError."""
+    config = _minimal_valid_config()
+    config["diameter"] = -5.0
+
+    with pytest.raises(ValueError, match="looks unphysical"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_bad_temperature():
+    """Test that an unphysical temperature raises ValueError."""
+    config = _minimal_valid_config()
+    config["temperature"] = 5000.0
+
+    with pytest.raises(ValueError, match="looks unphysical"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_missing_channels():
+    """Test that an empty mode dict (no channels) raises ValueError."""
+    config = _minimal_valid_config()
+    config["IFS"] = {}
+
+    with pytest.raises(ValueError, match="must define at least one channel"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_missing_channel_scalar_key():
+    """Test that a channel missing 'dc'/'rn'/'cic' raises ValueError."""
+    config = _minimal_valid_config()
+    del config["IMAGER"]["vis"]["rn"]
+
+    with pytest.raises(ValueError, match="missing required key 'rn'"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_negative_scalar_key():
+    """Test that a negative dc/rn/cic raises ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["dc"] = -1.0
+
+    with pytest.raises(ValueError, match="must be a non-negative number"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_bad_pixscale():
+    """Test that a non-positive pixscale_mas raises ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["pixscale_mas"] = 0.0
+
+    with pytest.raises(ValueError, match="must be a positive number"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_missing_spectral():
+    """Test that a missing 'spectral' key raises ValueError."""
+    config = _minimal_valid_config()
+    del config["IMAGER"]["vis"]["spectral"]
+
+    with pytest.raises(ValueError, match="missing required key 'spectral'"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_missing_wavelength_range():
+    """Test that a missing 'wavelength_range' key raises ValueError."""
+    config = _minimal_valid_config()
+    del config["IMAGER"]["vis"]["wavelength_range"]
+
+    with pytest.raises(ValueError, match="missing required key 'wavelength_range'"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_spectral_missing_wavelength():
+    """Test that a spectral dict missing 'wavelength' raises ValueError."""
+    config = _minimal_valid_config()
+    del config["IMAGER"]["vis"]["spectral"]["wavelength"]
+
+    with pytest.raises(ValueError, match="missing 'wavelength'"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_spectral_length_mismatch():
+    """Test that mismatched array lengths in spectral data raise ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["spectral"]["qe"] = np.array(
+        [0.9, 0.9]
+    )  # len 2 vs wavelength len 3
+
+    with pytest.raises(ValueError, match="length mismatch"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_wavelength_not_increasing():
+    """Test that a non-monotonic wavelength array raises ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["spectral"]["wavelength"] = np.array([0.5, 0.4, 0.6])
+
+    with pytest.raises(ValueError, match="not strictly increasing"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_qe_out_of_bounds():
+    """Test that qe values outside [0, 1] raise ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["spectral"]["qe"] = np.array([0.9, 1.5, 0.9])
+
+    with pytest.raises(ValueError, match=r"must lie within \[0, 1\]"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_wavelength_range_too_narrow():
+    """Test that wavelength_range not covering the spectral domain raises ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["wavelength_range"] = (0.45, 0.5)
+
+    with pytest.raises(ValueError, match="does not"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_wavelength_range_wrong_shape():
+    """Test that a malformed wavelength_range raises ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["wavelength_range"] = (0.4, 0.5, 0.6)  # 3 elements, not 2
+
+    with pytest.raises(ValueError, match="2-element"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_wavelength_range_min_gte_max():
+    """Test that wavelength_range with min >= max raises ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["wavelength_range"] = (0.6, 0.4)
+
+    with pytest.raises(ValueError, match="must be strictly"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+# ============================================================================
 # Tests for Observatory.validate_configuration
 # ============================================================================
 
@@ -730,10 +965,37 @@ def test_calculate_optics_throughput_ifs_mode(
     )
 
 
-def test_calculate_optics_throughput_from_components(
-    configured_mock_observatory, mock_observation_imager, mock_scene
+@patch("pyEDITH.observatory.utils.rebin_channel_curves_to_grid")
+def test_calculate_optics_throughput_from_eac_config(
+    mock_rebin, configured_mock_observatory, mock_observation_imager, mock_scene
 ):
-    """Test calculation of optics throughput from component throughputs."""
+    """Test optics throughput calculation from EAC config, mocking the rebin step."""
+    mock_rebin.return_value = {"optics_throughput": np.array([0.75])}
+
+    spectral = {
+        "wavelength": np.array([0.45, 0.5, 0.55]),
+        "optics_throughput": np.array([0.7, 0.8, 0.9]),
+        "qe": np.array([0.9, 0.9, 0.9]),
+        "dqe": np.array([0.75, 0.75, 0.75]),
+    }
+    configured_mock_observatory.configuration = {
+        "diameter": 8.0,
+        "temperature": 290.0,
+        "IMAGER": {
+            "vis": {
+                "dc": 3e-5,
+                "rn": 0.1,
+                "cic": 0.0,
+                "pixscale_mas": 10.0,
+                "wavelength_range": (0.45, 0.55),
+                "spectral": spectral,
+            }
+        },
+        "IFS": {},
+    }
+    configured_mock_observatory.active_channel = "vis"
+    mock_observation_imager.wavelength_range = u.Quantity([0.45, 0.55], u.micron)
+
     parameters = {"observing_mode": "IMAGER", "wavelength": 0.5}
     mediator = ObservatoryMediator(
         configured_mock_observatory, mock_observation_imager, mock_scene
@@ -741,13 +1003,28 @@ def test_calculate_optics_throughput_from_components(
 
     configured_mock_observatory.calculate_optics_throughput(parameters, mediator)
 
-    expected = [
-        configured_mock_observatory.telescope.telescope_optical_throughput.value[0]
-        * configured_mock_observatory.coronagraph.coronagraph_optical_throughput.value[
-            0
-        ]
-    ]
-    assert configured_mock_observatory.optics_throughput.value == expected
+    assert configured_mock_observatory.optics_throughput.unit == DIMENSIONLESS
+    assert np.allclose(configured_mock_observatory.optics_throughput.value, [0.75])
+
+    mock_rebin.assert_called_once()
+    called_spectral = mock_rebin.call_args.args[0]
+    assert called_spectral is spectral
+
+
+def test_calculate_optics_throughput_no_config_raises(
+    configured_mock_observatory, mock_observation_imager, mock_scene
+):
+    """Test that ValueError is raised when no T_optical and no EAC config are available."""
+    configured_mock_observatory.configuration = None
+    parameters = {"observing_mode": "IMAGER", "wavelength": 0.5}
+    mediator = ObservatoryMediator(
+        configured_mock_observatory, mock_observation_imager, mock_scene
+    )
+
+    with pytest.raises(
+        ValueError, match="Could not calculate optics throughput from the YAML files"
+    ):
+        configured_mock_observatory.calculate_optics_throughput(parameters, mediator)
 
 
 # ============================================================================
@@ -824,6 +1101,38 @@ def test_observatory_load_configuration(
     assert mock_observatory.optics_throughput.value == [0.8]
     assert hasattr(mock_observatory, "epswarmTrcold")
     assert hasattr(mock_observatory, "total_throughput")
+
+
+def test_observatory_load_configuration_toymodel_active_channel_none(
+    mock_observatory, mock_observation_imager, mock_scene
+):
+    """Test that active_channel is None when observatory has no EAC configuration."""
+    mock_observatory.configuration = None
+    parameters = {"observing_mode": "IMAGER", "T_optical": 0.8, "wavelength": 0.5}
+
+    mock_observatory.load_configuration(parameters, mock_observation_imager, mock_scene)
+
+    assert mock_observatory.active_channel is None
+
+
+def test_observatory_load_configuration_eac_selects_active_channel(
+    mock_observatory, mock_observation_imager, mock_scene
+):
+    """Test that load_configuration selects the active channel from EAC configuration."""
+    mock_observatory.configuration = {
+        "IMAGER": {
+            "vis": {"wavelength_range": (0.4, 0.6)},
+            "nir": {"wavelength_range": (0.9, 1.8)},
+        },
+        "IFS": {},
+    }
+    mock_observation_imager.wavelength_range = u.Quantity([0.45, 0.55], u.micron)
+
+    parameters = {"observing_mode": "IMAGER", "T_optical": 0.8, "wavelength": 0.5}
+
+    mock_observatory.load_configuration(parameters, mock_observation_imager, mock_scene)
+
+    assert mock_observatory.active_channel == "vis"
 
 
 # ============================================================================
