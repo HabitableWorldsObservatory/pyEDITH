@@ -502,6 +502,38 @@ class Observatory(ABC):  # abstract class
 
         """
 
+        def _scalar_from_hwome(v, name, eac_name):
+            """Extract a single scalar float from an hwome `.v` accessor.
+
+            hwome returns scalars as single-element (masked) arrays. We take the sole
+            underlying element and convert to float. We deliberately do NOT tolerate
+            multi-element arrays or fully-masked-with-fill-value results, because those
+            would silently corrupt engineering data. If hwome's representation changes,
+            this fails loudly with a clear message rather than propagating a fill-value.
+            """
+            arr = np.ma.asarray(v)
+
+            # Guard 1: must be a single scalar, not a vector we'd silently truncate.
+            if arr.size != 1:
+                raise ValueError(
+                    f"[{eac_name}] expected a scalar for '{name}' from hwome, "
+                    f"got an array of size {arr.size}: {v!r}. hwome's data "
+                    f"representation may have changed."
+                )
+
+            # Guard 2: take the underlying data of the sole element, ignoring the mask
+            # flag (which is incidental for scalars) -- but via .data, never .filled(),
+            # so a fill-value can never masquerade as a real measurement.
+            value = float(np.ma.getdata(arr).reshape(()))
+
+            # Guard 3: the extracted number must itself be sane.
+            if not np.isfinite(value):
+                raise ValueError(
+                    f"[{eac_name}] scalar '{name}' from hwome is not finite: {value!r}."
+                )
+
+            return value
+
         from hwome.roam.analyzer import Analyzer
         from hwome.core.navigator import search_configuration
 
@@ -599,16 +631,26 @@ class Observatory(ABC):  # abstract class
                 configuration_by_obs[chan_name] = {
                     "pixscale_mas": float(
                         (
-                            nav_chan.Detector.pixel_pitch.v
-                            / nav_chan.focal_length.v
+                            _scalar_from_hwome(
+                                nav_chan.Detector.pixel_pitch.v, "pixel_pitch", eac_name
+                            )
+                            / _scalar_from_hwome(
+                                nav_chan.focal_length.v, "focal_length", eac_name
+                            )
                             * u.radian
                         )
                         .to(u.mas)
                         .value
                     ),
-                    "dc": float(nav_chan.Detector.dark_current.v),  # ct/px/s
-                    "rn": float(nav_chan.Detector.read_noise.v),
-                    "cic": float(nav_chan.Detector.cic.v),  # ct/px
+                    "dc": _scalar_from_hwome(
+                        nav_chan.Detector.dark_current.v, "dark_current", eac_name
+                    ),  # ct/px/s
+                    "rn": _scalar_from_hwome(
+                        nav_chan.Detector.read_noise.v, "read_noise", eac_name
+                    ),
+                    "cic": _scalar_from_hwome(
+                        nav_chan.Detector.cic.v, "cic", eac_name
+                    ),  # ct/px
                     "wavelength_range": (
                         float(lower_edge.to(WAVELENGTH).value),
                         float(higher_edge.to(WAVELENGTH).value),
@@ -666,7 +708,6 @@ class Observatory(ABC):  # abstract class
             spectral: dict,
             context: str,
             value_keys: tuple,
-            unity_bounded_keys: set,
         ) -> np.ndarray:
             """
             Validate a channel's "spectral" sub-dict: a single shared "wavelength"
@@ -705,14 +746,13 @@ class Observatory(ABC):  # abstract class
                 if not np.all(np.isfinite(val)):
                     raise ValueError(f"{context}: '{val_key}' contains NaN/Inf values.")
 
-                if val_key in unity_bounded_keys:
-                    if val.min() < 0.0 or val.max() > 1.0:
-                        raise ValueError(
-                            f"{context}: '{val_key}' values must lie within [0, 1] "
-                            f"(got min={val.min():.4g}, max={val.max():.4g}). "
-                            f"A value outside this range likely indicates corrupted upstream "
-                            f"data or a units/scaling bug in the ingestion source."
-                        )
+                if val.min() < 0.0 or val.max() > 1.0:
+                    raise ValueError(
+                        f"{context}: '{val_key}' values must lie within [0, 1] "
+                        f"(got min={val.min():.4g}, max={val.max():.4g}). "
+                        f"A value outside this range likely indicates corrupted upstream "
+                        f"data or a units/scaling bug in the ingestion source."
+                    )
 
             return wl
 
@@ -782,9 +822,6 @@ class Observatory(ABC):  # abstract class
         # Keys required inside each channel's "spectral" sub-dict
         REQUIRED_SPECTRAL_VALUE_KEYS = ("optics_throughput", "qe", "dqe")
 
-        # Fields that are physically bounded to [0, 1] (fractional/probability-like quantities)
-        UNITY_BOUNDED_KEYS = {"optics_throughput", "qe", "dqe"}
-
         # --- top-level keys/types ---
         for key, expected_type in REQUIRED_TOP_LEVEL.items():
             if key not in config:
@@ -826,9 +863,13 @@ class Observatory(ABC):  # abstract class
                     if skey not in chan_config:
                         raise ValueError(f"{context} missing required key '{skey}'.")
                     val = chan_config[skey]
-                    if not isinstance(val, (int, float)) or val < 0:
+                    if (
+                        not isinstance(val, (int, float))
+                        or not np.isfinite(val)
+                        or val < 0
+                    ):
                         raise ValueError(
-                            f"{context}['{skey}'] = {val} must be a non-negative number."
+                            f"{context}['{skey}'] = {val} must be a finite, non-negative number."
                         )
 
                 # --- pixscale_mas ---
@@ -836,10 +877,13 @@ class Observatory(ABC):  # abstract class
                     raise ValueError(f"{context} missing required key 'pixscale_mas'.")
                 pixscale = chan_config["pixscale_mas"]
 
-                if not isinstance(pixscale, (int, float)) or pixscale <= 0:
+                if (
+                    not isinstance(pixscale, (int, float))
+                    or not np.isfinite(pixscale)
+                    or pixscale <= 0
+                ):
                     raise ValueError(
-                        f"{context}['pixscale_mas'] = {pixscale} must be a "
-                        f"positive number."
+                        f"{context}['pixscale_mas'] = {pixscale} must be a finite, positive number."
                     )
 
                 # --- wavelength_range + spectral data ---
@@ -854,7 +898,6 @@ class Observatory(ABC):  # abstract class
                     chan_config["spectral"],
                     context=f"{context}['spectral']",
                     value_keys=REQUIRED_SPECTRAL_VALUE_KEYS,
-                    unity_bounded_keys=UNITY_BOUNDED_KEYS,
                 )
 
                 _validate_wavelength_range(
