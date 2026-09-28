@@ -406,6 +406,39 @@ def test_parse_input_file_with_valid_spectrum_file(valid_spectrum_file):
 
 
 # ============================================================================
+# Tests for _parse_array_value
+# ============================================================================
+
+
+def test_parse_array_value_unquoted_string(tmp_path):
+    """A non-numeric array item with no surrounding quotes is
+    appended as-is (the quote-stripping branch is skipped)."""
+    file_path = tmp_path / "input.txt"
+    file_path.write_text(
+        "observing_mode = 'IMAGER'\n"
+        "wavelength = 0.5\n"
+        "modes = [photometry, spectroscopy]\n"  # unquoted, non-numeric items
+    )
+    variables, _ = parse_input_file(str(file_path), secondary_flag=False)
+    assert variables["modes"] == ["photometry", "spectroscopy"]
+
+
+def test_parse_line_without_equals_is_skipped(tmp_path):
+    """A non-comment, non-empty line that contains no '=' is
+    ignored, and parsing continues with subsequent lines."""
+    file_path = tmp_path / "input.txt"
+    file_path.write_text(
+        "observing_mode = 'IMAGER'\n"
+        "this line has no equals sign\n"  # no '=' -> skipped
+        "wavelength = 0.5\n"
+    )
+    variables, _ = parse_input_file(str(file_path), secondary_flag=False)
+    assert variables["observing_mode"] == "IMAGER"
+    assert variables["wavelength"] == 0.5
+    assert "this line has no equals sign" not in variables
+
+
+# ============================================================================
 # Tests for normalize_list_shapes
 # ============================================================================
 
@@ -2008,7 +2041,7 @@ def test_parse_filters_list_mixed_invalid():
         )
 
 
-def test_parse_filteres_list_empty():
+def test_parse_filters_list_empty():
     """Test parsing empty filter_list."""
 
     with pytest.raises(
@@ -2033,6 +2066,58 @@ def test_parse_filters_list_dict_not_filter():
                 "observing_mode": "IMAGER",
             }
         )
+
+
+def test_parse_filters_ifs_with_only_one_wavelength():
+    """Check that in IFS mode wavelength is an array of length > 1."""
+    f = Filter("VIS", low=0.4 * u.um, high=0.8 * u.um, resolution=100, type="IFS")
+    parameters = {
+        "wavelength": [0.55] * WAVELENGTH,
+        "observing_mode": "IFS",
+        "filter_list": [f],
+    }
+    with pytest.raises(
+        ValueError, match="Assigned an IFS filter but only one wavelength datapoint"
+    ):
+        result = parse_filters(parameters)
+
+
+def test_parse_filters_wavelength_already_quantity():
+    """When wavelength arrives already as a Quantity, the unit-attach step is skipped (629 -> 632)."""
+    f = Filter("VIS", low=0.4 * u.um, high=0.8 * u.um, resolution=100, type="IFS")
+    parameters = {
+        "wavelength": np.array([0.4, 0.6, 0.8]) * WAVELENGTH,  # already a Quantity
+        "observing_mode": "IFS",
+        "filter_list": [f],
+    }
+    result = parse_filters(parameters)
+    assert result == [f]
+
+
+def test_parse_filters_invalid_mode_raises():
+    """Unrecognised observing_mode raises before any dispatch."""
+    parameters = {
+        "wavelength": np.array([0.4, 0.6]) * WAVELENGTH,
+        "observing_mode": "SOMETHING_ELSE",
+    }
+    with pytest.raises(ValueError, match="unrecognised observing_mode"):
+        parse_filters(parameters)
+
+
+def test_parse_filters_ifs_empty_overlap_skips_resolution_check():
+    """IFS filter is covered (input straddles it) but no input
+    sample point lands inside [f.low, f.high], so overlap is empty and the loop
+    continues without running the resolution diagnostic."""
+    # Filter band [0.5, 0.6]; input samples at 0.4 and 0.7 straddle it
+    # (0.4 <= 0.5 and 0.7 >= 0.6 -> covered), but neither lies within [0.5, 0.6].
+    f = Filter("VIS", low=0.5 * u.um, high=0.6 * u.um, resolution=100, type="IFS")
+    parameters = {
+        "wavelength": np.array([0.4, 0.7]) * WAVELENGTH,
+        "observing_mode": "IFS",
+        "filter_list": [f],
+    }
+    result = parse_filters(parameters)
+    assert result == [f]
 
 
 # ============================================================================
@@ -2087,6 +2172,23 @@ def test_parse_filters_legacy_imager_missing_bandwidth():
 # ============================================================================
 # Tests for parse_filters - Legacy Filter Helper (IFS mode)
 # ============================================================================
+
+
+def test_parse_filters_legacy_ifs_bounds_already_quantity():
+    """Line 711: _as_wavelength_quantity receives an existing Quantity (not a
+    list), taking the isinstance branch. Also covers the legacy IFS build path."""
+    parameters = {
+        "wavelength": np.array([0.3, 0.6, 1.0]) * WAVELENGTH,
+        "observing_mode": "IFS",
+        "spectral_resolution": [100],
+        "lam_low": np.array([0.4]) * u.um,  # a Quantity, not a list
+        "lam_high": np.array([0.8]) * u.um,  # a Quantity, not a list
+    }
+    result = parse_filters(parameters)
+    assert len(result) == 1
+    assert result[0].type == "IFS"
+    assert np.isclose(result[0].low.to(u.um).value, 0.4)
+    assert np.isclose(result[0].high.to(u.um).value, 0.8)
 
 
 def test_parse_filters_legacy_ifs_creates_multiple_filters(caplog):
@@ -2254,6 +2356,23 @@ def test_parse_filters_legacy_ifs_regrid_info_message(caplog):
         "Calculating a new wavelength grid" in record.message
         for record in caplog.records
     )
+
+
+def test_parse_filters_legacy_ifs_bounds_already_quantity():
+    """Legacy IFS path with lam_low/lam_high already as Quantities skips both
+    unit-attach steps"""
+    parameters = {
+        "wavelength": np.array([0.3, 0.5, 0.9]) * WAVELENGTH,
+        "observing_mode": "IFS",
+        "spectral_resolution": [100],
+        "lam_low": [0.4 * u.um],  # already Quantities
+        "lam_high": [0.8 * u.um],  # already Quantities
+    }
+    result = parse_filters(parameters)
+    assert len(result) == 1
+    assert result[0].type == "IFS"
+    assert np.isclose(result[0].low.to(u.um).value, 0.4)
+    assert np.isclose(result[0].high.to(u.um).value, 0.8)
 
 
 # ============================================================================

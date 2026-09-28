@@ -4,7 +4,7 @@ from astropy import units as u
 from pyEDITH.coronagraphs import (
     ToyModelCoronagraph,
     CoronagraphYIP,
-    generate_radii,
+    _generate_radii,
 )
 from pyEDITH.units import (
     LAMBDA_D,
@@ -40,6 +40,15 @@ class MockMediator_IMAGER:
         else:
             return 1.0
 
+    def get_telescope_parameter(self, param):
+        if param == "diameter":
+            return 8.0 * LENGTH
+        return 1.0
+
+    def get_eac_configuration(self):
+        # Return None - tests use ToyModel or direct YIP files
+        return None
+
 
 class MockMediator_IFS:
     def get_observation_parameter(self, param):
@@ -57,6 +66,15 @@ class MockMediator_IFS:
             return 1e-3 * ARCSEC
         else:
             return 1.0
+
+    def get_telescope_parameter(self, param):
+        if param == "diameter":
+            return 8.0 * LENGTH
+        return 1.0
+
+    def get_eac_configuration(self):
+        # Return None - tests use ToyModel or direct YIP files
+        return None
 
 
 @pytest.fixture
@@ -152,27 +170,27 @@ def single_wavelength_params():
 
 
 # ============================================================================
-# Tests for generate_radii
+# Tests for _generate_radii
 # ============================================================================
 
 
-def test_generate_radii_even_dimensions():
+def test__generate_radii_even_dimensions():
     """Test radii generation with even dimensions."""
-    radii = generate_radii(10, 10)
+    radii = _generate_radii(10, 10)
     assert radii.shape == (10, 10)
 
 
-def test_generate_radii_odd_dimensions():
+def test__generate_radii_odd_dimensions():
     """Test radii generation with odd dimensions has zero at center."""
-    radii = generate_radii(5, 5)
+    radii = _generate_radii(5, 5)
 
     assert np.isclose(radii[2, 2], 0.0)
     assert np.isclose(radii[0, 0], np.sqrt(radii[0, 2] ** 2 + radii[2, 0] ** 2))
 
 
-def test_generate_radii_default_square():
+def test__generate_radii_default_square():
     """Test radii generation defaults to square when y dimension not provided."""
-    radii = generate_radii(5)
+    radii = _generate_radii(5)
 
     assert radii.shape == (5, 5)
     assert np.isclose(radii[2, 2], 0.0)
@@ -879,7 +897,6 @@ def test_coronagraph_yip_load_configuration_imager_az_avg_false(
     mock_instrument,
     mock_telescope,
     imager_yipcoronagraph_basic_params,
-    monkeypatch,
 ):
     """Test that az_avg=False uses full 2D stellar intensity map."""
     from unittest.mock import MagicMock
@@ -891,11 +908,10 @@ def test_coronagraph_yip_load_configuration_imager_az_avg_false(
     original_stellar_intens = yippy_coronagraph.stellar_intens
     original_core_mean = yippy_coronagraph.core_mean_intensity_map
 
-    stellar_intens_tmp = MagicMock(side_effect=original_stellar_intens)
-    stellar_intens_tmp.center_x = original_stellar_intens.center_x
-    stellar_intens_tmp.center_y = original_stellar_intens.center_y
-    monkeypatch.setattr(yippy_coronagraph, "stellar_intens", stellar_intens_tmp)
-    monkeypatch.setattr(yippy_coronagraph, "core_mean_intensity_map", MagicMock(side_effect=original_core_mean))
+    yippy_coronagraph.stellar_intens = MagicMock(side_effect=original_stellar_intens)
+    yippy_coronagraph.core_mean_intensity_map = MagicMock(
+        side_effect=original_core_mean
+    )
 
     coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
     parameters = imager_yipcoronagraph_basic_params.copy()
