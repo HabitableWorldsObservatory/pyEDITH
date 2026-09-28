@@ -158,7 +158,7 @@ def calc_flux_zero_point(
                 SPECTRAL_FLUX_DENSITY_CGS_WAVELENGTH,
                 equivalencies=u.spectral_density(lambd),
             )
-        elif output_unit == "pcgs":
+        else:  # can either be cgs or pcgs in the perlambd case (Jy and perlambd are incompatible)
             f0 = f0.to(
                 PHOTON_FLUX_DENSITY_CGS_WAVELENGTH,
                 equivalencies=u.spectral_density(lambd),

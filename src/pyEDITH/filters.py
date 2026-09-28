@@ -50,6 +50,8 @@ class Filter:
             Spectral resolution R = λ/Δλ
 
         """
+
+        # ---- Set up from user specs ----
         if name is not None:
             self.name = name
         else:
@@ -90,30 +92,46 @@ class Filter:
                 f"Filter '{name}': Must provide either (low, high) or (center, bandwidth)"
             )
 
-        if self.type == "IMAGER" or self.resolution == None:
-            if self.resolution is None:
-                logger.warning(
-                    f"Filter {name}: resolution not set, will default to IMAGER type."
-                )
+        # ---- Check and fix type ----
+        if self.type not in ["IMAGER", "IFS"]:
+            raise ValueError(
+                f"Filter '{self.name}': Type must be either IMAGER "
+                f"(broadband photometry) or IFS (spectroscopy)."
+            )
+
+        # An IFS filter with no resolution cannot build a wavelength grid,
+        # so we demote it to broadband IMAGER behaviour.
+        if self.type == "IFS" and self.resolution is None:
+            logger.warning(
+                f"Filter {self.name}: IFS type requires a resolution, "
+                f"but none was set. Defaulting to IMAGER (broadband photometry)."
+            )
+            self.type = "IMAGER"
+
+        # An IMAGER that was handed a resolution is over-specified; the value
+        # is meaningless for broadband photometry, so we ignore it (with a nudge).
+        elif self.type == "IMAGER" and self.resolution is not None:
+            logger.warning(
+                f"Filter {self.name}: IMAGER type ignores the supplied "
+                f"resolution (R={self.resolution}); using broadband photometry."
+            )
+
+        # ---- Calculate wavelength ----
+
+        if self.type == "IMAGER":
             ## BROADBAND PHOTOMETRY
             self.wavelength = np.array([self.center.value]) * WAVELENGTH
             self.delta_wavelength = None
 
-        elif self.type == "IFS":
+        else:
             ## SPECTROSCOPY
-            # Create wavelength array
             lam, dlam = utils.generate_wavelength_grid(
                 res=self.resolution,
                 lam_low=self.low.value,
                 lam_high=self.high.value,
             )
-
             self.wavelength = lam * WAVELENGTH
             self.delta_wavelength = dlam * WAVELENGTH
-        else:
-            raise ValueError(
-                f"Filter '{name}': Type must be either IMAGER (broadband photometry) or IFS (spectroscopy)."
-            )
 
     def contains(self, wavelength: u.Quantity) -> bool:
         """Check if a wavelength falls within this filter."""

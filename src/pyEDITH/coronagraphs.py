@@ -13,7 +13,7 @@ import copy
 logger = logging.getLogger("pyEDITH")
 
 
-def generate_radii(numx: int, numy: int = 0) -> np.ndarray:
+def _generate_radii(numx: int, numy: int = 0) -> np.ndarray:
     """
     Generate a 2D distribution of radii from the center of a matrix.
 
@@ -299,7 +299,7 @@ class ToyModelCoronagraph(Coronagraph):
         self.ycenter = self.npix / 2.0 * PIXEL
 
         self.r = (
-            generate_radii(self.npix, self.npix) * self.pixscale
+            _generate_radii(self.npix, self.npix) * self.pixscale
         )  # create an array of circumstellar separations in units of lambd/D centered on star
 
         self.omega_lod = (
@@ -488,7 +488,9 @@ class CoronagraphYIP(Coronagraph):
             )
 
         # Prefer psf_trunc_ratio if both are provided
-        if psf_trunc is not None:
+        use_trunc_ratio = psf_trunc is not None  # flag for later
+
+        if use_trunc_ratio:
             self.psf_trunc_ratio = psf_trunc * DIMENSIONLESS
             if phot_aperture is not None:
                 logger.warning(
@@ -496,16 +498,10 @@ class CoronagraphYIP(Coronagraph):
                     "Using 'psf_trunc_ratio' and ignoring 'photometric_aperture_radius'."
                 )
             self.photometric_aperture_radius = None
+            obs_trunc_float = float(self.psf_trunc_ratio)  # Fed to YIPPY
         else:
             self.psf_trunc_ratio = None
             self.photometric_aperture_radius = phot_aperture * LAMBDA_D
-
-        # ***** Load the YIP using yippy *****
-        obs_trunc_ratio = self.psf_trunc_ratio
-        if obs_trunc_ratio is not None:
-            # Strip units so yippy receives a plain float
-            obs_trunc_float = float(obs_trunc_ratio)
-        else:
             obs_trunc_float = None
 
         if self.yippy_coro is not None:
@@ -563,9 +559,9 @@ class CoronagraphYIP(Coronagraph):
         # Separation grid from yippy (replaces generate_radii)
         self.DEFAULT_CONFIG["r"] = yippy_obj.separation_map() * LAMBDA_D
 
-        self.DEFAULT_CONFIG["npsfratios"] = len([self.psf_trunc_ratio])
+        self.DEFAULT_CONFIG["npsfratios"] = 1
 
-        if self.psf_trunc_ratio is not None:
+        if use_trunc_ratio:
 
             logger.info("Using psf_trunc_ratio to calculate Omega...")
 
@@ -575,10 +571,7 @@ class CoronagraphYIP(Coronagraph):
                 ..., np.newaxis
             ]
 
-        elif (
-            self.psf_trunc_ratio is None
-            and self.photometric_aperture_radius is not None
-        ):
+        else:
             logger.info("Using photometric_aperture_radius to calculate Omega...")
 
             # Use the photometric_aperture_radius method of calculating Omega.

@@ -295,63 +295,51 @@ class EACDetector(Detector):
                 f"Cannot proceed with detector initialization."
             )
 
-        if eac_config is not None:
-            # **** LOAD FROM UNIFIED EAC CONFIGURATION ****
-            obs_mode = mediator.get_observation_parameter("observing_mode")
-            active_channel = mediator.get_active_channel()
-            mode_config = eac_config[obs_mode]
+        # **** LOAD FROM UNIFIED EAC CONFIGURATION ****
+        obs_mode = mediator.get_observation_parameter("observing_mode")
+        active_channel = mediator.get_active_channel()
+        mode_config = eac_config[obs_mode]
 
-            if active_channel is not None and active_channel in mode_config:
-                channel_config = mode_config[active_channel]
+        if active_channel is None or active_channel not in mode_config:
+            raise RuntimeError("Could not parse detector specs.")
 
-                # BIN CONFIGURATION DATA TO WAVELENGTH OF INTEREST
-                curve_keys = ["qe", "dqe"]
-                rebinned = utils.rebin_channel_curves_to_grid(
-                    channel_config["spectral"],
-                    curve_keys,
-                    to_wavelength=mediator.get_observation_parameter(
-                        "wavelength"
-                    ).value,
-                    to_delta_wavelength=(
-                        mediator.get_observation_parameter("delta_wavelength").value
-                        if mediator.get_observation_parameter("delta_wavelength")
-                        is not None
-                        else None
-                    ),
-                    interpolation=(
-                        "Gaussian"
-                        if mediator.get_observation_parameter("delta_wavelength")
-                        is not None
-                        else "1d"
-                    ),
-                    obs_mode=obs_mode,
-                    wavelength_range=mediator.get_observation_parameter(
-                        "wavelength_range"
-                    ),
-                )
+        channel_config = mode_config[active_channel]
 
-                # REMINDER: These values are already binned at the right wavelength
-                # points because we ran rebin_channel_curves_to_grid
-                self.DEFAULT_CONFIG["QE"] = (
-                    np.asarray(rebinned["qe"]) * QUANTUM_EFFICIENCY
-                )
+        # BIN CONFIGURATION DATA TO WAVELENGTH OF INTEREST
+        curve_keys = ["qe", "dqe"]
+        rebinned = utils.rebin_channel_curves_to_grid(
+            channel_config["spectral"],
+            curve_keys,
+            to_wavelength=mediator.get_observation_parameter("wavelength").value,
+            to_delta_wavelength=(
+                mediator.get_observation_parameter("delta_wavelength").value
+                if mediator.get_observation_parameter("delta_wavelength") is not None
+                else None
+            ),
+            interpolation=(
+                "Gaussian"
+                if mediator.get_observation_parameter("delta_wavelength") is not None
+                else "1d"
+            ),
+            obs_mode=obs_mode,
+            wavelength_range=mediator.get_observation_parameter("wavelength_range"),
+        )
 
-                self.DEFAULT_CONFIG["dQE"] = np.asarray(rebinned["dqe"]) * DIMENSIONLESS
+        # REMINDER: These values are already binned at the right wavelength
+        # points because we ran rebin_channel_curves_to_grid
+        self.DEFAULT_CONFIG["QE"] = np.asarray(rebinned["qe"]) * QUANTUM_EFFICIENCY
 
-                # Double checking length:
-                for key in ["QE", "dQE"]:
-                    assert len(self.DEFAULT_CONFIG[key]) == len(
-                        mediator.get_observation_parameter("wavelength")
-                    ), f"{key} array length does not match observation wavelength grid after rebinning."
+        self.DEFAULT_CONFIG["dQE"] = np.asarray(rebinned["dqe"]) * DIMENSIONLESS
 
-                self.DEFAULT_CONFIG["DC"] = [channel_config["dc"]] * DARK_CURRENT
-                self.DEFAULT_CONFIG["RN"] = [channel_config["rn"]] * READ_NOISE
-                self.DEFAULT_CONFIG["CIC"] = (
-                    channel_config["cic"] * CLOCK_INDUCED_CHARGE
-                )
+        # Double checking length:
+        for key in ["QE", "dQE"]:
+            assert len(self.DEFAULT_CONFIG[key]) == len(
+                mediator.get_observation_parameter("wavelength")
+            ), f"{key} array length does not match observation wavelength grid after rebinning."
 
-            else:
-                raise RuntimeError("Could not parse detector specs.")
+        self.DEFAULT_CONFIG["DC"] = [channel_config["dc"]] * DARK_CURRENT
+        self.DEFAULT_CONFIG["RN"] = [channel_config["rn"]] * READ_NOISE
+        self.DEFAULT_CONFIG["CIC"] = channel_config["cic"] * CLOCK_INDUCED_CHARGE
 
         # PIXEL SCALE: get it from the YAML files, or assume one
 

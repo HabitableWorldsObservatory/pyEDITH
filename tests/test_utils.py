@@ -192,6 +192,44 @@ def test_average_over_bandpass_preserves_non_array_params(
     assert result["scalar_param"] == 42
 
 
+def test_average_over_bandpass_empty_mask_interpolates_at_center(
+    sample_params_with_wavelength,
+):
+    """
+    When no tabulated wavelength falls inside the requested band, the function
+    must fall back to interpolating the curve at the band center rather than
+    averaging an empty slice. Exercises the 61 -> 70 (else) branch.
+    """
+    # lam sample points sit at 0.4, 0.5, 0.6, 0.7, 0.8 um.
+    # This narrow band [0.55, 0.56] straddles NO sample point, so mask is empty,
+    # but its center (0.555) lies WITHIN the curve domain [0.4, 0.8].
+    wavelength_range = [0.55 * WAVELENGTH, 0.56 * WAVELENGTH]
+
+    result = average_over_bandpass(sample_params_with_wavelength, wavelength_range)
+
+    # Linear interpolation at 0.555 um between (0.5 -> 2.0) and (0.6 -> 3.0)
+    # gives 2.0 + 0.55 * (3.0 - 2.0) = 2.55
+    assert np.isclose(result["value"], 2.55)
+    assert not np.isnan(result["value"])
+
+
+def test_average_over_bandpass_empty_mask_out_of_domain_returns_nan(
+    sample_params_with_wavelength,
+):
+    """
+    When the empty-band center lies OUTSIDE the curve's native domain, the
+    fallback interpolation must return NaN (by design), so downstream code can
+    use the NaN to flag where the curve does not apply. Also exercises 61 -> 70.
+    """
+    # Band center at ~0.95 um lies beyond the curve domain (max lam = 0.8 um),
+    # and no sample point falls inside [0.9, 1.0], so mask is empty.
+    wavelength_range = [0.90 * WAVELENGTH, 1.00 * WAVELENGTH]
+
+    result = average_over_bandpass(sample_params_with_wavelength, wavelength_range)
+
+    assert np.isnan(result["value"])
+
+
 # ============================================================================
 # Tests for interpolate_over_bandpass
 # ============================================================================

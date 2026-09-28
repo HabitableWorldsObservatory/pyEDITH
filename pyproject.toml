@@ -48,4 +48,4 @@ include-package-data = true
 pyedith = "pyEDITH.cli:main"
 
 [tool.pytest.ini_options]
-addopts = "-ra --cov=pyEDITH --cov-report=html --cov-report=term-missing"
+addopts = "-ra --cov=pyEDITH --cov-report=html --cov-report=term-missing --cov-branch"

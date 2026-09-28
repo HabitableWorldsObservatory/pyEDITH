@@ -17,7 +17,10 @@ from pyEDITH.units import (
     ARCSEC,
     SECOND,
     FRAME,
+    LAMBDA_D,
+    lambda_d_to_arcsec,
 )
+import logging
 
 
 # ============================================================================
@@ -253,6 +256,8 @@ def test_toy_model_detector_load_configuration_ifs_defaults():
 # # ============================================================================
 # # Tests for EACDetector.load_configuration - IMAGER mode
 # # ============================================================================
+
+
 def test_eac_detector_load_configuration_imager_basic(
     fake_eac_config,
     imager_eac_detector_parameters,
@@ -280,6 +285,39 @@ def test_eac_detector_load_configuration_imager_basic(
     assert detector.DC.shape == expected_shape
     assert detector.RN.shape == expected_shape
     assert detector.QE.shape == expected_shape
+
+
+def test_eac_detector_none_config_raises(imager_eac_detector_parameters):
+    """When the observatory hands back no EAC config, we must refuse to proceed."""
+    detector = EACDetector(keyword="EAC1")
+    parameters = imager_eac_detector_parameters.copy()
+    mediator = MockMediator(
+        eac_config=None,
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to load EAC configuration"):
+        detector.load_configuration(parameters=parameters, mediator=mediator)
+
+
+def test_eac_detector_bad_channel_raises(imager_eac_detector_parameters):
+    """An active_channel that isn't present in the mode config is unrecoverable."""
+    detector = EACDetector(keyword="EAC1")
+
+    eac_config = {
+        "IMAGER": {
+            # note: no "VIS" key here
+        },
+        "diameter": 6.0,
+    }
+    parameters = imager_eac_detector_parameters.copy()
+    mediator = MockMediator(
+        eac_config=eac_config,
+        observing_mode="IMAGER",
+        active_channel="VIS",  # deliberately not in mode_config["IMAGER"]
+    )
+
+    with pytest.raises(RuntimeError, match="Could not parse detector specs"):
+        detector.load_configuration(parameters=parameters, mediator=mediator)
 
 
 # ============================================================================
@@ -317,6 +355,64 @@ def test_eac_detector_load_configuration_ifs_basic(
     assert detector.RN.shape == expected_shape
     assert detector.QE.shape == expected_shape
     assert detector.CIC.shape == expected_shape
+
+
+# # ============================================================================
+# # Change pixscale
+# # ============================================================================
+
+
+def test_eac_detector_diameter_mismatch_recalculates_pixscale(
+    fake_eac_config, imager_eac_detector_parameters, caplog
+):
+    """
+    When the telescope diameter differs from the EAC-config diameter, the
+    detector must warn and recompute the pixel scale from 0.5 * lambda/D,
+    discarding the YAML-provided pixscale_mas. Exercises lines 361-372.
+    """
+    # The MockMediator hard-codes telescope diameter at 8.0 m. Perturb the
+    # EAC-config diameter so the two disagree and the mismatch branch fires.
+    fake_eac_config["diameter"] = 6.0  # != 8.0 m from the mediator
+
+    mediator = MockMediator(
+        observing_mode="IMAGER",
+        eac_config=fake_eac_config,
+        active_channel="VIS",
+        delta_wavelength=None,  # IMAGER -> "1d" interpolation, single wavelength
+    )
+
+    detector = EACDetector(keyword="EAC1")
+
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
+        detector.load_configuration(imager_eac_detector_parameters, mediator)
+
+    # 1. The warning must have fired.
+    assert any(
+        "Recalculating pixel scale" in record.message for record in caplog.records
+    ), "Expected a pixel-scale recalculation warning, but none was logged."
+
+    # 2. The pixscale must be the RECOMPUTED lambda/D value,
+    #    NOT the raw 10.0 mas from fake_eac_config["IMAGER"]["VIS"]["pixscale_mas"].
+    #    Recomputation uses the MEDIATOR's diameter (8.0 m), not the config's 6.0.
+    expected_pixscale = (
+        0.5
+        * lambda_d_to_arcsec(
+            1 * LAMBDA_D,
+            0.5e-6 * LENGTH,
+            (8.0 * LENGTH).to(LENGTH),
+        )
+    ).to(MAS)
+
+    assert np.isclose(detector.pixscale_mas.value, expected_pixscale.value), (
+        f"Pixel scale was not recomputed correctly: "
+        f"got {detector.pixscale_mas}, expected {expected_pixscale}"
+    )
+
+    # 3. Sanity: it is NOT the raw config value (guards against a silent
+    #    'warning fired but value unchanged' regression).
+    assert not np.isclose(
+        detector.pixscale_mas.value, 10.0
+    ), "Pixel scale still equals the raw YAML value; recomputation did not occur."
 
 
 # # ============================================================================

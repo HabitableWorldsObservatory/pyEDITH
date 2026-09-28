@@ -1025,15 +1025,13 @@ def calculate_exposure_time_or_snr(
             u.s,
         )  # set all values higher than the limit to infinity
 
-        if observatory.coronagraph.nrolls != 1:
-            # multiply by number of required rolls to
-            # achieve 360 deg coverage
-            # (after tlimit enforcement)
-            exptime_arr = exptime_arr * observatory.coronagraph.nrolls
+        # multiply by number of required rolls to achieve 360 deg coverage
+        # if nrolls=1 nothing happens
+        exptime_arr = exptime_arr * observatory.coronagraph.nrolls
 
         observation.exptime = exptime_arr.decompose()
 
-    elif mode == "signal_to_noise":
+    else:  # mode is "signal_to_noise": we can just say else because we checked that there can only be two keywords
 
         # cp_arr not used in this mode. Note: This will make the science time in
         # validation variables be 0!
@@ -1112,7 +1110,7 @@ def calculate_exposure_time_or_snr(
         invalid_mask = np.atleast_1d(np.asarray(invalid_mask, dtype=bool))
         exptime_vals = np.where(invalid_mask, np.inf, exptime_vals)
         observation.exptime = u.Quantity(exptime_vals, u.s)
-    elif mode == "signal_to_noise":
+    else:  # mode is "signal_to_noise": we can just say else because we checked that there can only be two keywords
         fullsnr_vals = np.atleast_1d(
             u.Quantity(observation.fullsnr, DIMENSIONLESS).value
         ).astype(float)
