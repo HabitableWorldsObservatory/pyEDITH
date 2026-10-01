@@ -6,6 +6,7 @@ src/pyEDITH/__pycache__
 build
 docs/source/imaging_tutorial.ipynb
 docs/source/spectroscopy_tutorial.ipynb
+docs/source/exoearth_spectroscopy_tutorial.ipynb
 src/pyEDITH/components/__pycache__
 src/pyEDITH/components/__pycache__/coronagraphs.cpython-312.pyc
 src/pyEDITH/components/__pycache__/telescopes.cpython-312.pyc
