@@ -25,6 +25,7 @@ run_pyedith
 imaging_tutorial
 spectroscopy_tutorial
 exoearth_spectroscopy_tutorial
+imaging_early-vs-modern_Venus
 yippy_guide
 glossary
 validation
