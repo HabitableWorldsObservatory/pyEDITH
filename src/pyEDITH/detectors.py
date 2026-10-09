@@ -160,7 +160,7 @@ class ToyModelDetector(Detector):
             0.5
             * lambda_d_to_arcsec(
                 1 * LAMBDA_D,
-                0.5e-6 * LENGTH,
+                0.5 * WAVELENGTH,
                 mediator.get_telescope_parameter("diameter").to(LENGTH),
             )
         ).to(MAS)
@@ -360,11 +360,12 @@ class EACDetector(Detector):
         # ] * DIMENSIONLESS  # Effective QE due to degradation, cosmic ray effects, readout inefficiencies ## TO ADD TO YAML
 
         # Calculate default detector pixel scale based on telescope
+
         self.DEFAULT_CONFIG["pixscale_mas"] = (
             0.5
             * lambda_d_to_arcsec(
                 1 * LAMBDA_D,
-                0.5e-6 * LENGTH,
+                0.5 * WAVELENGTH,
                 mediator.get_telescope_parameter("diameter").to(LENGTH),
             )
         ).to(MAS)
