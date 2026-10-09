@@ -165,7 +165,7 @@ class ToyModelDetector(Detector):
             0.5
             * lambda_d_to_arcsec(
                 1 * LAMBDA_D,
-                0.5e-6 * LENGTH,
+                0.5 * WAVELENGTH,
                 mediator.get_telescope_parameter("diameter").to(LENGTH),
             )
         ).to(MAS)
@@ -354,7 +354,7 @@ class EACDetector(Detector):
                 0.5
                 * lambda_d_to_arcsec(
                     1 * LAMBDA_D,
-                    0.5e-6 * LENGTH,
+                    0.5 * WAVELENGTH,
                     mediator.get_telescope_parameter("diameter").to(LENGTH),
                 )
             ).to(MAS)
