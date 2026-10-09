@@ -129,8 +129,7 @@ If `name` is not provided, an auto-generated numeric identifier is assigned.
 | stellar_radius                | Scalar        | R_sun           | stellar radius in solar radii                                                   | Yes            |
 | stellar_angular_diameter_arcsec                | Scalar        | arcsec           | angular diameter of the star                                                   | No            |
 | npsfratios                      | Scalar                   | Dimensionless       | Number of PSF truncation ratios   (default 1)                                      | No            |
-| nrolls                          | Scalar                   | Dimensionless       | Number of roll angles performed                                       | Yes           |
-| coronagraph_optical_throughput          | [nlambda]                | Dimensionless | Throughput for all coronagraph optics                        | Yes           |
+| nrolls                          | Scalar                   | Dimensionless       | Number of roll angles performed                                       | Yes                 |
 | coronagraph_spectral_resolution | Scalar                   | Dimensionless | Spectral resolution of the coronagraph                       | Yes           |
 | contrast                        | Scalar                   | Dimensionless | Noise floor contrast of coronagraph                          | Yes (ToyModel only)           |
 | noisefloor_factor               | Scalar                   | Dimensionless | Systematic noise floor factor                                | Yes (ToyModel only)           |
@@ -156,7 +155,6 @@ where `omega_lod` is the solid angle of the photometric aperture.
 | unobscured_area      | Scalar    | Dimensionless | Unobscured area percentage                    | Yes           |
 | toverhead_fixed      | Scalar    | Time          | Fixed overhead time                           | Yes           |
 | toverhead_multi      | Scalar    | Dimensionless | Multiplicative overhead time                  | Yes           |
-| telescope_optical_throughput | [nlambda] | Dimensionless | Optical throughput of telescope               | Yes           |
 | temperature          | Scalar    | Temperature   | Temperature of the warm optics                | Yes           |
 | T_contamination              | Scalar    | Dimensionless | Effective throughput factor for contamination | Yes           |
 

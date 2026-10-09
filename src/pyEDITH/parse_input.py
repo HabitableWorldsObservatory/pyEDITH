@@ -472,8 +472,6 @@ def parse_parameters(parameters: dict) -> dict:
         "delta_mag",  # used to be [nmeananom x norbits x ntargs]
         "F0",  # for validation purposes, the calculation of F0 is different in AYO
         "det_npix_input",  # for validation purposes
-        "telescope_optical_throughput",
-        "coronagraph_optical_throughput",
     ]
 
     parsed_params.update(
@@ -623,156 +621,177 @@ def parse_parameters(parameters: dict) -> dict:
 
 
 def parse_filters(parameters):
+    """Return the list of active Filter objects for this observation.
 
-    active_filters = []
-    # ALWAYS ensure it has units
-    input_wls = parameters["wavelength"]
+    Two paths:
+      - Modern: an explicit `filter_list` is provided and validated/filtered.
+      - Legacy: filters are synthesised from deprecated scalar parameters.
+    """
 
-    if not isinstance(input_wls, u.Quantity):
-        input_wls = input_wls * WAVELENGTH
+    mode = parameters["observing_mode"]
 
-    wl_min = np.min(input_wls).to(WAVELENGTH)
-    wl_max = np.max(input_wls).to(WAVELENGTH)
+    if mode not in ["IMAGER", "IFS"]:
+        raise ValueError(
+            f"Could not parse filters: unrecognised observing_mode "
+            f"'{mode}'. Expected 'IMAGER' or 'IFS'."
+        )
 
-    if "filter_list" in parameters.keys():
-        filter_list = parameters["filter_list"]
+    # Make parameters wavelength a quantity and scale to the right units
+    wavelength = parameters["wavelength"]
+    if not isinstance(wavelength, u.Quantity):
+        wavelength = wavelength * WAVELENGTH
+    input_wls = wavelength.to(WAVELENGTH)
 
-        # If it's a single filter, convert to list
-        if not isinstance(filter_list, list):
-            filter_list = [filter_list]
+    # Check that no IFS mode with single wavelengths have been provided
+    if input_wls.size == 1 and mode == "IFS":
+        raise ValueError(
+            "Assigned an IFS filter but only one wavelength datapoint is provided."
+        )
 
-        # Validate each filter in the list
-        for i, f in enumerate(filter_list):
-            # Check if it's a Filter object (duck typing - check for expected attributes)
-            if not hasattr(f, "__dict__"):
-                raise TypeError(
-                    f"Filter at index {i}: must be a Filter object, "
-                    f"but got {type(f).__name__}"
-                )
+    if "filter_list" in parameters:  # standard behavior
+        active = _select_from_filter_list(parameters, input_wls)
+    else:  # legacy behavior
+        active = _build_legacy_filters(parameters, input_wls)
 
-            # TEMPORARY: will go away once we force the user to provide the spectrum
-            # check if the value is in-between the filter that I request. Assume it is the average value.
-            if (parameters["observing_mode"] == "IMAGER") and (
-                wl_min <= f.high and wl_max >= f.low
-            ):  # wl_min and wl_max should be the same
-                active_filters.append(f)
-            # Check spectral resolution compatibility for IFS mode
-            elif (parameters["observing_mode"] == "IFS") and (
-                wl_min <= f.low and wl_max >= f.high
-            ):  # checking that original wavelength range is larger than the required filter
-                active_filters.append(f)
-                # Calculate input spectrum resolution
-                input_dlam = np.gradient(input_wls)
-                input_resolution = input_wls / input_dlam
+    if not active:
+        raise ValueError(
+            "No filters can be used. Specify different filters or change spectrum."
+        )
+    return active
 
-                # Find overlapping wavelength region
-                overlap_mask = (input_wls >= f.low) & (input_wls <= f.high)
-                if np.any(overlap_mask):
-                    # Get median resolution in overlapping region
-                    median_input_res = np.median(input_resolution[overlap_mask])
 
-                    # Warn if input resolution is lower than filter resolution
-                    if median_input_res < f.resolution:
-                        logger.warning(
-                            f"Filter {f.name if hasattr(f, 'name') else f}: "
-                            f"Input spectrum resolution (R~{median_input_res:.1f}) is lower than "
-                            f"filter resolution (R~{f.resolution:.1f}). "
-                            f"Interpolation to filter wavelength grid may introduce artifacts."
-                        )
-            else:
-                logger.warning(
-                    f"Filter {f.name if hasattr(f, 'name') else f} discarded: "
-                    f"wavelength range [{wl_min}, {wl_max}] does not fully cover "
-                    f"filter range [{f.low}, {f.high}]"
-                )
+def _select_from_filter_list(parameters, input_wls):
+    """Validate a user-supplied filter_list and keep those covered by the
+    input wavelength range. For IFS, warn if the input under-resolves a filter."""
 
-        if len(active_filters) == 0:
-            raise ValueError(
-                "No filters can be used. Specify different filters or change spectrum."
+    mode = parameters["observing_mode"]
+    filter_list = parameters["filter_list"]
+    if not isinstance(filter_list, list):
+        filter_list = [filter_list]
+
+    wl_min, wl_max = np.min(input_wls), np.max(input_wls)
+    active = []
+
+    for i, f in enumerate(filter_list):
+        if not hasattr(f, "__dict__"):
+            raise TypeError(
+                f"Filter at index {i}: must be a Filter object, "
+                f"but got {type(f).__name__}"
             )
-        else:
-            return active_filters
-    else:
-        logger.warning("Making a filter from the legacy parameters...")
-        # LEGACY FILTER HELPER
 
-        if parameters["observing_mode"] == "IMAGER":
-            # Extract scalar value from input_wls, handling both array and scalar cases
+        # Check that filter is contained within wavelength range
+        # IMAGER (TEMPORARY: will go away once we force the user to provide the spectrum):
+        # check if the value is in-between the filter that I request. Assume it is the average value.
+        # IFS: check if the wavelength extends beyond filter edges
+        covered = (mode == "IMAGER" and wl_min <= f.high and wl_max >= f.low) or (
+            mode == "IFS" and wl_min <= f.low and wl_max >= f.high
+        )
+        if not covered:
+            logger.warning(
+                f"Filter {getattr(f, 'name', f)} discarded: wavelength range [{wl_min}, {wl_max}] does not fully cover filter range [{f.low}, {f.high}]"
+            )
+            continue
 
-            if input_wls.isscalar:
-                center = input_wls
-            else:
-                center = input_wls.flat[0]  # it is an array, pick the first value
+        active.append(f)
 
-            return [
-                Filter(
-                    name=str(np.round(center.value, 1))
-                    + " BW "
-                    + str(parameters["bandwidth"]),
-                    center=center,
-                    bandwidth=parameters["bandwidth"],
-                    type="IMAGER",
-                )
-            ]
-
-        elif parameters["observing_mode"] == "IFS":
-            # In IFS mode, create a filter for each value of spectral_resolution/lam_low/lam_high
-            logger.info("Calculating a new wavelength grid and re-gridding spectra...")
-
-            deprecated_keys = ["spectral_resolution", "lam_low", "lam_high"]
-            if all(key in parameters for key in deprecated_keys):
-                logger.warning(
-                    "DeprecationWarning: The parameters 'regrid_wavelength', 'spectral_resolution', 'lam_low', and 'lam_high' will be deprecated soon. "
-                    "Please update your configuration to use the new Filter object."
-                )
-
-                # Check that all required parameters are arrays/lists
-                for key in deprecated_keys:
-                    val = parameters[key]
-                    if not isinstance(val, (list, np.ndarray, u.Quantity)):
-                        raise ValueError(
-                            f"'{key}' is not an array. "
-                            f"All of {', '.join(deprecated_keys)} must be arrays of the same length."
-                        )
-
-                assert (
-                    len(parameters["spectral_resolution"])
-                    == len(parameters["lam_low"])
-                    == len(parameters["lam_high"])
-                ), f"{', '.join(deprecated_keys)} have different lengths. All must have the same length."
-                assert (
-                    np.min(input_wls.value) < parameters["lam_low"][0]
-                ), "Your minimum input wavelength is greater than first channel lower boundary."
-                assert (
-                    np.max(input_wls.value) > parameters["lam_high"][-1]
-                ), f"Your maximum input wavelength is less than last channel upper boundary."
-
-                for i in range(0, len(parameters["spectral_resolution"])):
-                    res = parameters["spectral_resolution"][i]
-                    lam_low = parameters["lam_low"][i]
-                    lam_high = parameters["lam_high"][i]
-                    if not isinstance(lam_low, u.Quantity):
-                        lam_low = lam_low * WAVELENGTH
-                    if not isinstance(lam_high, u.Quantity):
-                        lam_high = lam_high * WAVELENGTH
-                    active_filters.append(
-                        Filter(
-                            str(np.round(lam_low, 1))
-                            + "-"
-                            + str(np.round(lam_high, 1))
-                            + "IFS",
-                            low=lam_low,
-                            high=lam_high,
-                            resolution=res,
-                            type="IFS",
-                        )
+        # IFS-only resolution diagnostic
+        if mode == "IFS":
+            overlap = (input_wls >= f.low) & (input_wls <= f.high)
+            if np.any(overlap):
+                input_res = input_wls / np.gradient(input_wls)
+                if np.median(input_res[overlap]) < f.resolution:
+                    logger.warning(
+                        f"Filter {f.name if hasattr(f, 'name') else f}: "
+                        f"Input spectrum resolution (R~{np.median(input_res[overlap]):.1f}) is lower than "
+                        f"filter resolution (R~{f.resolution:.1f}). "
+                        f"Interpolation to filter wavelength grid may introduce artifacts."
                     )
+    return active
 
-                return active_filters
-            else:
+
+def _build_legacy_filters(parameters, input_wls):
+    """Synthesise Filter objects from deprecated scalar parameters."""
+
+    def _as_wavelength_quantity(values):
+        return u.Quantity(
+            [
+                v.to(WAVELENGTH) if isinstance(v, u.Quantity) else v * WAVELENGTH
+                for v in values
+            ]
+        )
+
+    logger.warning("Making a filter from the legacy parameters...")
+    mode = parameters["observing_mode"]
+    active = []
+
+    if mode == "IMAGER":
+        center = input_wls if input_wls.isscalar else input_wls.flat[0]
+        active.append(
+            Filter(
+                name=str(np.round(center.value, 1))
+                + " BW "
+                + str(parameters["bandwidth"]),
+                center=center,
+                bandwidth=parameters["bandwidth"],
+                type="IMAGER",
+            )
+        )
+
+    else:
+        # In IFS mode, create a filter for each value of spectral_resolution/lam_low/lam_high
+        logger.info("Calculating a new wavelength grid and re-gridding spectra...")
+
+        # Stop if not all the keys are available, else raise warning for legacy
+        deprecated_keys = ["spectral_resolution", "lam_low", "lam_high"]
+        if not all(key in parameters for key in deprecated_keys):
+            raise ValueError(
+                f"Could not find filters; attempted legacy behavior but some of the following keys are missing: {deprecated_keys}"
+            )
+
+        logger.warning(
+            "DeprecationWarning: The parameters 'regrid_wavelength', 'spectral_resolution', 'lam_low', and 'lam_high' will be deprecated soon. "
+            "Please update your configuration to use the new Filter object."
+        )
+
+        # Check that all required parameters are arrays/lists
+        for key in deprecated_keys:
+            val = parameters[key]
+            if not isinstance(val, (list, np.ndarray, u.Quantity)):
                 raise ValueError(
-                    f"Could not find filters; attempted legacy behavior but some of the following keys are missing: {deprecated_keys}"
+                    f"'{key}' is not an array. "
+                    f"All of {', '.join(deprecated_keys)} must be arrays of the same length."
                 )
+
+        assert (
+            len(parameters["spectral_resolution"])
+            == len(parameters["lam_low"])
+            == len(parameters["lam_high"])
+        ), f"{', '.join(deprecated_keys)} have different lengths. All must have the same length."
+
+        lam_low = _as_wavelength_quantity(parameters["lam_low"])
+        lam_high = _as_wavelength_quantity(parameters["lam_high"])
+        assert np.min(input_wls) < np.min(
+            lam_low
+        ), "Your minimum input wavelength is greater than smallest channel lower boundary."
+        assert np.max(input_wls) > np.max(
+            lam_high
+        ), f"Your maximum input wavelength is less than largest channel upper boundary."
+
+        for i in range(0, len(parameters["spectral_resolution"])):
+            active.append(
+                Filter(
+                    str(np.round(lam_low[i], 1))
+                    + "-"
+                    + str(np.round(lam_high[i], 1))
+                    + "IFS",
+                    low=lam_low[i],
+                    high=lam_high[i],
+                    resolution=parameters["spectral_resolution"][i],
+                    type="IFS",
+                )
+            )
+
+    return active
 
 
 def read_configuration(

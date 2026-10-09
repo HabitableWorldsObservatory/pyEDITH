@@ -4,7 +4,7 @@ from astropy import units as u
 from pyEDITH.coronagraphs import (
     ToyModelCoronagraph,
     CoronagraphYIP,
-    generate_radii,
+    _generate_radii,
 )
 from pyEDITH.units import (
     LAMBDA_D,
@@ -40,6 +40,15 @@ class MockMediator_IMAGER:
         else:
             return 1.0
 
+    def get_telescope_parameter(self, param):
+        if param == "diameter":
+            return 8.0 * LENGTH
+        return 1.0
+
+    def get_eac_configuration(self):
+        # Return None - tests use ToyModel or direct YIP files
+        return None
+
 
 class MockMediator_IFS:
     def get_observation_parameter(self, param):
@@ -57,6 +66,15 @@ class MockMediator_IFS:
             return 1e-3 * ARCSEC
         else:
             return 1.0
+
+    def get_telescope_parameter(self, param):
+        if param == "diameter":
+            return 8.0 * LENGTH
+        return 1.0
+
+    def get_eac_configuration(self):
+        # Return None - tests use ToyModel or direct YIP files
+        return None
 
 
 @pytest.fixture
@@ -152,19 +170,19 @@ def single_wavelength_params():
 
 
 # ============================================================================
-# Tests for generate_radii
+# Tests for _generate_radii
 # ============================================================================
 
 
 def test_generate_radii_even_dimensions():
     """Test radii generation with even dimensions."""
-    radii = generate_radii(10, 10)
+    radii = _generate_radii(10, 10)
     assert radii.shape == (10, 10)
 
 
 def test_generate_radii_odd_dimensions():
     """Test radii generation with odd dimensions has zero at center."""
-    radii = generate_radii(5, 5)
+    radii = _generate_radii(5, 5)
 
     assert np.isclose(radii[2, 2], 0.0)
     assert np.isclose(radii[0, 0], np.sqrt(radii[0, 2] ** 2 + radii[2, 0] ** 2))
@@ -172,7 +190,7 @@ def test_generate_radii_odd_dimensions():
 
 def test_generate_radii_default_square():
     """Test radii generation defaults to square when y dimension not provided."""
-    radii = generate_radii(5)
+    radii = _generate_radii(5)
 
     assert radii.shape == (5, 5)
     assert np.isclose(radii[2, 2], 0.0)
@@ -217,7 +235,6 @@ def test_toy_model_load_configuration_basic_parameters(
         assert coronagraph.Tcore == 0.3 * DIMENSIONLESS
         assert coronagraph.TLyot == 0.7 * DIMENSIONLESS
         assert coronagraph.nrolls == 1
-        assert coronagraph.coronagraph_optical_throughput == [0.44] * DIMENSIONLESS
         assert coronagraph.coronagraph_spectral_resolution == 1 * DIMENSIONLESS
         assert hasattr(coronagraph, "npsfratios")
         assert hasattr(coronagraph, "npix")
@@ -354,7 +371,6 @@ def test_toy_model_load_configuration_ifs_basic_parameters(
         assert coronagraph.Tcore == 0.3 * DIMENSIONLESS
         assert coronagraph.TLyot == 0.7 * DIMENSIONLESS
         assert coronagraph.nrolls == 1
-        assert coronagraph.coronagraph_optical_throughput == [0.44] * DIMENSIONLESS
         assert coronagraph.coronagraph_spectral_resolution == 1 * DIMENSIONLESS
 
         # --- Attributes exist ---
@@ -585,11 +601,7 @@ def test_coronagraph_yip_init_not_both_path_and_yippy(yippy_coronagraph):
 # ============================================================================
 
 
-@patch("eacy.load_instrument")
-@patch("eacy.load_telescope")
 def test_coronagraph_yip_warns_when_user_overrides_locked_key(
-    mock_load_telescope,
-    mock_load_instrument,
     caplog,
     yippy_coronagraph,
     mock_instrument,
@@ -605,8 +617,6 @@ def test_coronagraph_yip_warns_when_user_overrides_locked_key(
     ``nrolls`` is in ``CoronagraphYIP.LOCKED_KEYS``, so the override is
     rejected with a warning.
     """
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_telescope.return_value = mock_telescope
 
     # Sanity check that the key we are testing really is locked, so this test
     # stays meaningful if LOCKED_KEYS is ever refactored.
@@ -634,62 +644,71 @@ def test_coronagraph_yip_warns_when_user_overrides_locked_key(
     assert expected_warning in locked_warnings
 
 
-# @patch("eacy.load_instrument")
-# @patch("eacy.load_telescope")
-# def test_coronagraph_yip_no_warning_when_user_sets_unlocked_key(
-#     mock_load_telescope,
-#     mock_load_instrument,
-#     caplog,
-#     yippy_coronagraph,
-#     mock_instrument,
-#     mock_telescope,
-#     imager_yipcoronagraph_basic_params,
-# ):
-#     """
-#     The opposite case: a user-supplied value for an UNLOCKED key (``nois``)
-#     must be applied and must NOT trigger a lock warning.
-#     """
-#     mock_load_instrument.return_value = mock_instrument
-#     mock_load_telescope.return_value = mock_telescope
+def test_coronagraph_yip_obs_trunc_float_stripped_to_bare_float(
+    imager_yipcoronagraph_basic_params,
+):
+    """
+    When psf_trunc_ratio is supplied and the yippy object must be *constructed*
+    (path branch), the value handed to yippycoro(...) must be a plain Python
+    float — yippy expects a bare float, not an Astropy Quantity.
 
-#     assert "psf_truncation_ratio" not in CoronagraphYIP.LOCKED_KEYS
+    Guards `obs_trunc_float = float(self.psf_trunc_ratio)`. Also a sentinel
+    across the planned removal of dimensionality: whether psf_trunc_ratio is a
+    DIMENSIONLESS Quantity (now) or a bare float (later), float() must yield the
+    same scalar and this test should keep passing. If it fails, the
+    de-dimensionalisation changed how the trunc ratio reaches yippy.
+    """
+    captured = {}
 
-#     coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
-#     parameters = imager_yipcoronagraph_basic_params.copy()
+    def fake_yippycoro(path, psf_trunc_ratio=None):
+        captured["path"] = path
+        captured["psf_trunc_ratio"] = psf_trunc_ratio
+        # Return a fully-formed fake so the rest of load_configuration runs.
+        mock_yippy = MagicMock()
+        mock_header = MagicMock()
+        mock_header.pixscale = MagicMock(value=0.1)
+        mock_header.naxis1 = 100
+        mock_header.xcenter = 50
+        mock_header.ycenter = 50
+        mock_header.lambda0 = 0.5 * WAVELENGTH
+        mock_header.minlam = 0.45 * WAVELENGTH
+        mock_header.maxlam = 0.55 * WAVELENGTH
+        mock_yippy.header = mock_header
+        mock_yippy.nrolls = 1
+        mock_yippy.psf_trunc_ratio = 0.3
+        mock_yippy.sky_trans.return_value = np.ones((100, 100))
+        mock_yippy.separation_map.return_value = np.ones((100, 100))
+        mock_yippy.core_area_map.return_value = np.ones((100, 100))
+        mock_yippy.throughput_map.return_value = np.ones((100, 100))
+        mock_yippy.core_mean_intensity_map.return_value = np.ones((100, 100))
+        mock_yippy.stellar_intens.return_value = np.ones((100, 100))
+        return mock_yippy
 
-#     mediator = MockMediator_IMAGER()
+    # Construct via PATH so obs_trunc_float actually reaches yippycoro(...).
+    coronagraph = CoronagraphYIP(path="dummy/path")
+    parameters = imager_yipcoronagraph_basic_params.copy()
+    parameters["psf_trunc_ratio"] = 1  # plain int in -> must arrive as float 1.0
+    mediator = MockMediator_IMAGER()
 
-#     with caplog.at_level(logging.WARNING, logger="pyEDITH"):
-#         coronagraph.load_configuration(parameters, mediator)
+    with patch("pyEDITH.coronagraphs.yippycoro", side_effect=fake_yippycoro):
+        coronagraph.load_configuration(parameters, mediator)
 
-#     # User value is applied.
-#     assert coronagraph.psf_truncation_ratio == 0.1
+    passed = captured["psf_trunc_ratio"]
 
-#     # No "locked" warning about bandwidth.
-#     bandwidth_lock_warnings = [
-#         rec.message
-#         for rec in caplog.records
-#         if rec.levelno == logging.WARNING
-#         and "bandwidth" in rec.message
-#         and "locked" in rec.message.lower()
-#     ]
-#     assert bandwidth_lock_warnings == []
+    # 1) yippy must receive a bare float, never a Quantity.
+    assert isinstance(passed, float), f"expected float, got {type(passed)}"
+    # 2) equal to the user's input value.
+    assert passed == 1.0
+    # 3) the stored attribute round-trips to the same scalar in either
+    #    dimensionality regime.
+    assert float(coronagraph.psf_trunc_ratio) == 1.0
 
 
-@patch("eacy.load_instrument")
-@patch("eacy.load_telescope")
 def test_coronagraph_yip_load_configuration_imager_basic_parameters(
-    mock_load_telescope,
-    mock_load_instrument,
     yippy_coronagraph,
-    mock_instrument,
-    mock_telescope,
     imager_yipcoronagraph_basic_params,
 ):
     """Test that basic YIP parameters are loaded correctly in IMAGER mode."""
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_telescope.return_value = mock_telescope
-
     coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
     parameters = imager_yipcoronagraph_basic_params.copy()
 
@@ -736,24 +755,13 @@ def test_coronagraph_yip_load_configuration_imager_basic_parameters(
     assert coronagraph.noisefloor.unit == DIMENSIONLESS
     assert np.all(coronagraph.skytrans == yippy_coronagraph.sky_trans() * DIMENSIONLESS)
 
-    assert len(coronagraph.coronagraph_optical_throughput) == 1
-    assert np.isclose(coronagraph.coronagraph_optical_throughput.value, 0.394770896)
 
-
-@patch("eacy.load_instrument")
-@patch("eacy.load_telescope")
 def test_coronagraph_yip_load_configuration_imager_default_noisefloor_ppf(
-    mock_load_telescope,
-    mock_load_instrument,
     yippy_coronagraph,
-    mock_instrument,
-    mock_telescope,
     caplog,
     imager_yipcoronagraph_basic_params,
 ):
     """Test that default noisefloor_PPF is used when not provided."""
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_telescope.return_value = mock_telescope
 
     coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
     parameters = imager_yipcoronagraph_basic_params.copy()
@@ -778,20 +786,12 @@ def test_coronagraph_yip_load_configuration_imager_default_noisefloor_ppf(
     )
 
 
-@patch("eacy.load_instrument")
-@patch("eacy.load_telescope")
 def test_coronagraph_yip_load_configuration_imager_custom_noisefloor_ppf(
-    mock_load_telescope,
-    mock_load_instrument,
     yippy_coronagraph,
-    mock_instrument,
-    mock_telescope,
     caplog,
     imager_yipcoronagraph_basic_params,
 ):
     """Test that custom noisefloor_PPF is used correctly."""
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_telescope.return_value = mock_telescope
 
     coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
     parameters = imager_yipcoronagraph_basic_params.copy()
@@ -818,19 +818,11 @@ def test_coronagraph_yip_load_configuration_imager_custom_noisefloor_ppf(
     )
 
 
-@patch("eacy.load_instrument")
-@patch("eacy.load_telescope")
 def test_coronagraph_yip_load_configuration_imager_noisefloor_factor_raises_error(
-    mock_load_telescope,
-    mock_load_instrument,
     yippy_coronagraph,
-    mock_instrument,
-    mock_telescope,
     imager_yipcoronagraph_basic_params,
 ):
     """Test that noisefloor_factor raises appropriate error in YIP mode."""
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_telescope.return_value = mock_telescope
 
     coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
     parameters = imager_yipcoronagraph_basic_params.copy()
@@ -844,19 +836,11 @@ def test_coronagraph_yip_load_configuration_imager_noisefloor_factor_raises_erro
         coronagraph.load_configuration(parameters, mediator)
 
 
-@patch("eacy.load_instrument")
-@patch("eacy.load_telescope")
 def test_coronagraph_yip_load_configuration_imager_missing_aperture_raises_error(
-    mock_load_telescope,
-    mock_load_instrument,
     yippy_coronagraph,
-    mock_instrument,
-    mock_telescope,
     imager_yipcoronagraph_basic_params,
 ):
     """Test that missing both aperture parameters raises error."""
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_telescope.return_value = mock_telescope
 
     coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
     parameters = imager_yipcoronagraph_basic_params.copy()
@@ -870,21 +854,32 @@ def test_coronagraph_yip_load_configuration_imager_missing_aperture_raises_error
         coronagraph.load_configuration(parameters, mediator)
 
 
-@patch("eacy.load_instrument")
-@patch("eacy.load_telescope")
+def test_coronagraph_yip_az_avg_true_uses_core_mean_intensity(
+    yippy_coronagraph, imager_yipcoronagraph_basic_params
+):
+    """az_avg=True must call core_mean_intensity_map (radial projection),
+    NOT stellar_intens. Mirror of the az_avg=False test."""
+    yippy_coronagraph.stellar_intens = MagicMock(
+        side_effect=yippy_coronagraph.stellar_intens
+    )
+    yippy_coronagraph.core_mean_intensity_map = MagicMock(
+        side_effect=yippy_coronagraph.core_mean_intensity_map
+    )
+    coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
+    parameters = imager_yipcoronagraph_basic_params.copy()
+    parameters["az_avg"] = True
+    coronagraph.load_configuration(parameters, MockMediator_IMAGER())
+
+    coronagraph_yippy = coronagraph.yippy_coro
+    yippy_coronagraph.core_mean_intensity_map.assert_called_once()
+    yippy_coronagraph.stellar_intens.assert_not_called()
+
+
 def test_coronagraph_yip_load_configuration_imager_az_avg_false(
-    mock_load_telescope,
-    mock_load_instrument,
     yippy_coronagraph,
-    mock_instrument,
-    mock_telescope,
     imager_yipcoronagraph_basic_params,
 ):
     """Test that az_avg=False uses full 2D stellar intensity map."""
-    from unittest.mock import MagicMock
-
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_telescope.return_value = mock_telescope
 
     # Wrap the methods as mocks while preserving their return values
     original_stellar_intens = yippy_coronagraph.stellar_intens
@@ -912,25 +907,42 @@ def test_coronagraph_yip_load_configuration_imager_az_avg_false(
     assert coronagraph.Istar.ndim == 2
 
 
+def test_coronagraph_yip_rejects_out_of_bounds_stellar_diameter(
+    yippy_coronagraph, imager_yipcoronagraph_basic_params
+):
+    """Stellar angular diameter >= 1 λ/D must raise AssertionError, per the
+    documented contract — Istar interpolation is undefined outside [0,1)."""
+
+    class BigStarMediator(MockMediator_IMAGER):
+        def get_scene_parameter(self, param):
+            if param == "stellar_angular_diameter_arcsec":
+                return 1.0 * ARCSEC  # absurdly large -> lod >= 1
+            return 1.0
+
+    coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
+    parameters = imager_yipcoronagraph_basic_params.copy()
+    with pytest.raises(AssertionError, match="Stellar diameter is outside bounds"):
+        coronagraph.load_configuration(parameters, BigStarMediator())
+
+
 # ============================================================================
 # Tests for CoronagraphYIP.load_configuration - IFS mode
 # ============================================================================
+# TODO(test-hygiene, 2nd-order): coronagraph IFS/IMAGER dedupe
+#  Both load_configuration methods have NO observing_mode branch, so the
+#  IFS test variants exercise identical code to their IMAGER twins.
+#  - Verify premise first: grep "observing_mode" in both load_configuration
+#    methods. If still absent, proceed.
+#  - Rename survivors to "..._is_mode_agnostic" + trim to shape-only asserts.
+#  - Delete the two ToyModel IFS noisefloor duplicates.
 
 
-@patch("eacy.load_instrument")
-@patch("eacy.load_telescope")
 def test_coronagraph_yip_load_configuration_ifs_basic_parameters(
-    mock_load_telescope,
-    mock_load_instrument,
     yippy_coronagraph,
-    mock_instrument,
-    mock_telescope,
     caplog,
     ifs_yipcoronagraph_basic_params,
 ):
     """Test that IFS mode correctly handles multiple wavelengths."""
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_telescope.return_value = mock_telescope
 
     coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
     parameters = ifs_yipcoronagraph_basic_params.copy()
@@ -977,27 +989,13 @@ def test_coronagraph_yip_load_configuration_ifs_basic_parameters(
     assert coronagraph.noisefloor.unit == DIMENSIONLESS
     assert np.all(coronagraph.skytrans == yippy_coronagraph.sky_trans() * DIMENSIONLESS)
 
-    assert len(coronagraph.coronagraph_optical_throughput) == 3
-    assert np.isclose(
-        coronagraph.coronagraph_optical_throughput.value,
-        [0.41891199, 0.43711322, 0.40535648],
-    ).all()
 
-
-@patch("eacy.load_instrument")
-@patch("eacy.load_telescope")
 def test_coronagraph_yip_load_configuration_ifs_prioritize_psf_trunc_ratio(
-    mock_load_telescope,
-    mock_load_instrument,
     yippy_coronagraph,
-    mock_instrument,
-    mock_telescope,
     caplog,
     ifs_yipcoronagraph_basic_params,
 ):
     """Test that IFS mode correctly handles multiple wavelengths."""
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_telescope.return_value = mock_telescope
 
     coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
     parameters = ifs_yipcoronagraph_basic_params.copy()
@@ -1019,20 +1017,12 @@ def test_coronagraph_yip_load_configuration_ifs_prioritize_psf_trunc_ratio(
     )
 
 
-@patch("eacy.load_instrument")
-@patch("eacy.load_telescope")
 def test_coronagraph_yip_photometric_aperture_tcore_calculations(
-    mock_load_telescope,
-    mock_load_instrument,
     yippy_coronagraph,
-    mock_instrument,
-    mock_telescope,
     caplog,
     ifs_yipcoronagraph_basic_params,
 ):
     """Test photometric aperture calculation with user-defined Tcore."""
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_telescope.return_value = mock_telescope
 
     coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
     parameters = ifs_yipcoronagraph_basic_params.copy()
@@ -1070,20 +1060,12 @@ def test_coronagraph_yip_photometric_aperture_tcore_calculations(
     )
 
 
-@patch("eacy.load_instrument")
-@patch("eacy.load_telescope")
 def test_coronagraph_yip_photometric_aperture_default_tcore(
-    mock_load_telescope,
-    mock_load_instrument,
     yippy_coronagraph,
-    mock_instrument,
-    mock_telescope,
     caplog,
     ifs_yipcoronagraph_basic_params,
 ):
     """Test that default Tcore is used when not provided."""
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_telescope.return_value = mock_telescope
 
     coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
     parameters = ifs_yipcoronagraph_basic_params.copy()
@@ -1123,19 +1105,11 @@ def test_coronagraph_yip_photometric_aperture_default_tcore(
 # ============================================================================
 
 
-@patch("eacy.load_instrument")
-@patch("eacy.load_telescope")
 def test_coronagraph_yip_load_from_path(
-    mock_load_telescope,
-    mock_load_instrument,
-    mock_instrument,
-    mock_telescope,
     coronagraph_path,
     ifs_yipcoronagraph_basic_params,
 ):
     """Test that CoronagraphYIP can be constructed from a path."""
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_telescope.return_value = mock_telescope
 
     coronagraph = CoronagraphYIP(path=coronagraph_path)
     parameters = ifs_yipcoronagraph_basic_params.copy()
@@ -1153,19 +1127,11 @@ def test_coronagraph_yip_load_from_path(
 # # ============================================================================
 
 
-@patch("eacy.load_instrument")
-@patch("eacy.load_telescope")
 def test_coronagraph_yip_preconstruced_yippy_coro(
-    mock_load_telescope,
-    mock_load_instrument,
-    mock_instrument,
-    mock_telescope,
     yippy_coronagraph,
     ifs_yipcoronagraph_basic_params,
 ):
     """Test that pre-constructed yippy_coro is used directly."""
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_telescope.return_value = mock_telescope
 
     coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
     parameters = ifs_yipcoronagraph_basic_params.copy()
@@ -1178,20 +1144,12 @@ def test_coronagraph_yip_preconstruced_yippy_coro(
     assert hasattr(coronagraph, "noisefloor")
 
 
-@patch("eacy.load_instrument")
-@patch("eacy.load_telescope")
 def test_coronagraph_yip_preconstruced_yippy_trunc_ratio_mismatch_warning(
-    mock_load_telescope,
-    mock_load_instrument,
-    mock_instrument,
-    mock_telescope,
     yippy_coronagraph,
     caplog,
     ifs_yipcoronagraph_basic_params,
 ):
     """Test warning when yippy_coro psf_trunc_ratio differs from parameters."""
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_telescope.return_value = mock_telescope
 
     coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
     parameters = ifs_yipcoronagraph_basic_params.copy()
@@ -1208,20 +1166,12 @@ def test_coronagraph_yip_preconstruced_yippy_trunc_ratio_mismatch_warning(
     )
 
 
-@patch("eacy.load_instrument")
-@patch("eacy.load_telescope")
 def test_coronagraph_yip_nrolls_from_yippy_object(
-    mock_load_telescope,
-    mock_load_instrument,
-    mock_instrument,
-    mock_telescope,
     yippy_coronagraph,
     monkeypatch,
     ifs_yipcoronagraph_basic_params,
 ):
     """Test that nrolls is read from yippy object when available."""
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_telescope.return_value = mock_telescope
 
     monkeypatch.setattr(yippy_coronagraph, "nrolls", 4, raising=False)
 
@@ -1233,19 +1183,11 @@ def test_coronagraph_yip_nrolls_from_yippy_object(
     assert coronagraph.DEFAULT_CONFIG["nrolls"] == 4
 
 
-@patch("eacy.load_instrument")
-@patch("eacy.load_telescope")
 def test_coronagraph_yip_missing_bandwidth_warning(
-    mock_load_telescope,
-    mock_load_instrument,
-    mock_instrument,
-    mock_telescope,
     caplog,
     ifs_yipcoronagraph_basic_params,
 ):
     """Test warning when bandwidth info is missing from YIP."""
-    mock_load_instrument.return_value = mock_instrument
-    mock_load_telescope.return_value = mock_telescope
 
     # Create a mock yippy object without bandwidth info
     mock_yippy = MagicMock()
@@ -1311,7 +1253,6 @@ def valid_coronagraph():
     coronagraph.coronagraph_bandwidth = 0.1
     coronagraph.npsfratios = 1
     coronagraph.nrolls = 1
-    coronagraph.coronagraph_optical_throughput = np.array([0.5]) * DIMENSIONLESS
     coronagraph.coronagraph_spectral_resolution = 1 * DIMENSIONLESS
     return coronagraph
 
