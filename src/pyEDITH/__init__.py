@@ -118,7 +118,12 @@ from .utils import *
 from .units import *
 
 # Import CLI functions
-from .cli import main, calculate_texp, calculate_snr
+from .cli import (
+    main,
+    calculate_texp,
+    calculate_snr,
+    calculate_snr_from_reference_lambda,
+)
 
 # Set a __all__ variable to control what gets imported with "from pyEDITH import *"
 __all__ = [
@@ -133,6 +138,7 @@ __all__ = [
     "main",
     "calculate_texp",
     "calculate_snr",
+    "calculate_snr_from_reference_lambda",
     "parse_input",
     "average_over_bandpass",
     "interpolate_over_bandpass",
