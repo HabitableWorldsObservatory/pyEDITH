@@ -1,10 +1,17 @@
 import pytest
 from unittest.mock import patch, MagicMock
 import numpy as np
-from pyEDITH.cli import main, calculate_texp, calculate_snr
+from pyEDITH.cli import (
+    main,
+    calculate_texp,
+    calculate_snr,
+    _get_closest_finite_time,
+    calculate_snr_from_reference_lambda,
+)
 from pyEDITH.filters import Filter
 from io import StringIO
 import astropy.units as u
+import logging
 
 # ============================================================================
 # Fixtures
@@ -50,6 +57,36 @@ def mock_parameters_ifs():
         "observing_mode": "IFS",
         "observatory_preset": "ToyModel",
         "filter_list": [Filter("VIS", low=0.4 * u.um, high=1.0 * u.um, resolution=140)],
+    }
+
+
+@pytest.fixture
+def mock_parameters_reference():
+    """Parameters whose filter spans the 1.0–2.0 µm reference wavelengths
+    used by the calculate_snr_from_reference_lambda tests, so Filter.contains()
+    is exercised honestly (1.5 inside, 99.0 outside)."""
+    return {
+        "wavelength": np.linspace(1.0, 2.0, 100),
+        "distance": 10,
+        "magV": 5.0,
+        "nzodis": 3.0,
+        "observing_mode": "IFS",
+        "observatory_preset": "ToyModel",
+        "filter_list": [
+            Filter("F150W", low=1.0 * u.um, high=2.0 * u.um, resolution=140)
+        ],
+    }
+
+
+@pytest.fixture
+def mock_parameters_two_filters():
+    return {
+        "observing_mode": "IFS",
+        "observatory_preset": "ToyModel",
+        "filter_list": [
+            Filter("VIS", low=0.4 * u.um, high=1.0 * u.um, resolution=140),
+            Filter("NIR", low=1.0 * u.um, high=1.8 * u.um, resolution=70),
+        ],
     }
 
 
@@ -140,75 +177,84 @@ def test_main_snr_basic_execution(
 
 
 # ============================================================================
-# Tests for main() - etc2snr subcommand
+# Tests for main() - etc2snr subcommand (single-function routing)
 # ============================================================================
 
 
 @patch("pyEDITH.cli.parse_input.read_configuration")
-def test_main_etc2snr_missing_secondary_params(mock_read_configuration):
-    """Test that etc2snr raises error when secondary parameters not specified."""
-    mock_read_configuration.return_value = ({}, {})
+def test_main_etc2snr_no_ref_lambda_raises(mock_read_configuration):
+    """etc2snr without --ref_lambda raises a descriptive ValueError (lines 140-145)."""
+    mock_read_configuration.return_value = ({"some": "params"}, {})
 
     with patch("sys.argv", ["edith", "etc2snr", "--edith", "test.edith"]):
-        with pytest.raises(
-            ValueError, match="The secondary parameters are not specified."
-        ):
+        with pytest.raises(ValueError, match="etc2snr requires --ref_lambda"):
             main()
 
 
 @patch("pyEDITH.cli.parse_input.read_configuration")
-def test_main_etc2snr_multiple_primary_wavelengths(mock_read_configuration):
-    """Test that etc2snr rejects multiple primary wavelengths."""
-    mock_read_configuration.return_value = (
-        {"wavelength": [0.5, 0.6]},
-        {"wavelength": [0.7]},
-    )
+@patch("pyEDITH.cli.calculate_snr_from_reference_lambda")
+def test_main_etc2snr_coupled_routing(mock_ref_snr, mock_read_configuration):
+    """--coupled routes with coupled=True and a single parsed float."""
+    mock_read_configuration.return_value = ({"some": "params"}, {})
+    mock_ref_snr.return_value = ({"VIS": {"snr": np.array([7.0])}}, 30.0, {})
 
-    with patch("sys.argv", ["edith", "etc2snr", "--edith", "test.edith"]):
-        with pytest.raises(
-            TypeError, match="Cannot accept multiple lambdas as primary lambda"
-        ):
+    with patch(
+        "sys.argv",
+        [
+            "edith",
+            "etc2snr",
+            "--edith",
+            "test.edith",
+            "--ref_lambda",
+            "1.5",
+            "--coupled",
+        ],
+    ):
+        with patch("builtins.print"):
             main()
+
+    mock_ref_snr.assert_called_once()
+    # Positional: (parameters, reference) ; keyword: coupled=True
+    assert mock_ref_snr.call_args[0][1] == [1.5]  # parsed to float, in a list
+    assert mock_ref_snr.call_args[1]["coupled"] is True
 
 
 @patch("pyEDITH.cli.parse_input.read_configuration")
-@patch("pyEDITH.cli.calculate_texp")
-def test_main_etc2snr_infinite_exposure_time(
-    mock_calculate_texp, mock_read_configuration
-):
-    """Test that etc2snr raises error when exposure time is infinite."""
-    mock_read_configuration.return_value = (
-        {"wavelength": [0.5]},
-        {"wavelength": [0.6]},
-    )
-    mock_calculate_texp.return_value = (float("inf"), {})
+@patch("pyEDITH.cli.calculate_snr_from_reference_lambda")
+def test_main_etc2snr_independent_routing(mock_ref_snr, mock_read_configuration):
+    """No --coupled routes with coupled=False and multiple parsed floats."""
+    mock_read_configuration.return_value = ({"some": "params"}, {})
+    mock_ref_snr.return_value = ({"VIS": {}, "NIR": {}}, {"VIS": 10.0, "NIR": 15.0}, {})
 
-    with patch("sys.argv", ["edith", "etc2snr", "--edith", "test.edith"]):
-        with pytest.raises(ValueError, match="Returned exposure time is infinity."):
+    with patch(
+        "sys.argv",
+        ["edith", "etc2snr", "--edith", "test.edith", "--ref_lambda", "0.5", "1.2"],
+    ):
+        with patch("builtins.print"):
             main()
+
+    mock_ref_snr.assert_called_once()
+    assert mock_ref_snr.call_args[0][1] == [0.5, 1.2]  # both parsed to float
+    assert mock_ref_snr.call_args[1]["coupled"] is False
 
 
 @patch("pyEDITH.cli.parse_input.read_configuration")
-@patch("pyEDITH.cli.calculate_texp")
-@patch("pyEDITH.cli.calculate_snr")
-def test_main_etc2snr_successful_calculation(
-    mock_calculate_snr, mock_calculate_texp, mock_read_configuration, mock_args
-):
-    """Test that etc2snr correctly calculates exposure time and SNR for secondary wavelength."""
-    mock_read_configuration.return_value = (
-        {"wavelength": [0.5], "extra_param": 0.1},
-        {"wavelength": [0.6]},
-    )
-    mock_calculate_texp.return_value = (np.array([1.0]), {})
-    mock_calculate_snr.return_value = (np.array([10.0]), {})
+@patch("pyEDITH.cli.calculate_snr_from_reference_lambda")
+def test_main_etc2snr_parses_strings_to_floats(mock_ref_snr, mock_read_configuration):
+    """Line 147: args.ref_lambda strings are converted to floats, not left as str."""
+    mock_read_configuration.return_value = ({"some": "params"}, {})
+    mock_ref_snr.return_value = ({}, {}, {})
 
-    with patch("sys.argv", ["edith", "etc2snr", "--edith", "test.edith"]):
-        with patch("builtins.print") as mock_print:
+    with patch(
+        "sys.argv",
+        ["edith", "etc2snr", "--edith", "test.edith", "--ref_lambda", "0.75"],
+    ):
+        with patch("builtins.print"):
             main()
-            mock_print.assert_any_call("Reference exposure time: ", np.array([1.0]))
-            mock_print.assert_any_call(
-                "SNR at the secondary lambda: ", np.array([10.0])
-            )
+
+    passed = mock_ref_snr.call_args[0][1]
+    assert passed == [0.75]
+    assert all(isinstance(x, float) for x in passed)  # genuinely floats, not "0.75"
 
 
 # ============================================================================
@@ -535,3 +581,305 @@ def test_calculate_snr_ifs_mode_with_regridding(mock_parameters_ifs):
 
         # Verify scene regridding was called
         mock_scene_instance.regrid_spectra.assert_called_once()
+
+
+# ============================================================================
+# Tests for calculate_snr() - dict (independent) time dispatch
+# ============================================================================
+
+
+def test_calculate_snr_accepts_dict_of_times(mock_parameters):
+    """Test that calculate_snr maps a dict of times onto the matching filter."""
+    with (
+        patch("pyEDITH.cli.Observation") as mock_observation,
+        patch("pyEDITH.cli.AstrophysicalScene") as mock_scene,
+        patch("pyEDITH.cli.Observatory") as mock_observatory,
+        patch("pyEDITH.cli.calculate_exposure_time_or_snr"),
+    ):
+        mock_observation_instance = MagicMock()
+        mock_observation_instance.fullsnr = np.array([10.0])
+        mock_observation_instance.validation_variables = {}
+        mock_observation.return_value = mock_observation_instance
+        mock_scene.return_value = MagicMock()
+        mock_observatory.return_value = MagicMock()
+
+        filter_name = mock_parameters["filter_list"][0].name
+        times_dict = {filter_name: 42.0}
+
+        snr, _ = calculate_snr(mock_parameters, times_dict)
+
+        # The scalar time for this specific filter must have been assigned
+        assert mock_observation_instance.obstime == 42.0
+        assert filter_name in snr
+
+
+def test_calculate_snr_dict_missing_filter_raises(mock_parameters):
+    """Test that calculate_snr raises KeyError if a filter is absent from the time dict."""
+    with (
+        patch("pyEDITH.cli.Observation") as mock_observation,
+        patch("pyEDITH.cli.AstrophysicalScene") as mock_scene,
+        patch("pyEDITH.cli.Observatory") as mock_observatory,
+        patch("pyEDITH.cli.calculate_exposure_time_or_snr"),
+    ):
+        mock_observation.return_value = MagicMock()
+        mock_scene.return_value = MagicMock()
+        mock_observatory.return_value = MagicMock()
+
+        # Provide a dict that does NOT contain the real filter name
+        times_dict = {"NonExistentFilter": 42.0}
+
+        with pytest.raises(
+            KeyError, match="not found in the provided exposure time dict"
+        ):
+            calculate_snr(mock_parameters, times_dict)
+
+
+# ============================================================================
+# Tests for _get_closest_finite_time()
+# ============================================================================
+
+
+def test_get_closest_finite_time_exact_match():
+    """Test the helper picks the exact bin when ref_wav lands on a grid point."""
+    wvl = np.array([1.0, 1.5, 2.0])
+    exptime = np.array([10.0, 20.0, 30.0])
+
+    t_val, actual_wvl = _get_closest_finite_time(wvl, exptime, 1.5)
+
+    assert t_val == 20.0
+    assert actual_wvl == 1.5
+
+
+def test_get_closest_finite_time_nearest_match():
+    """Test the helper rounds to the nearest bin for an in-between ref_wav."""
+    wvl = np.array([1.0, 1.5, 2.0])
+    exptime = np.array([10.0, 20.0, 30.0])
+
+    # 1.6 is closest to 1.5
+    t_val, actual_wvl = _get_closest_finite_time(wvl, exptime, 1.6)
+
+    assert t_val == 20.0
+    assert actual_wvl == 1.5
+
+
+def test_get_closest_finite_time_scalar_input():
+    """Test the helper handles IMAGER-style scalar wavelength/time inputs."""
+    t_val, actual_wvl = _get_closest_finite_time(1.0, 42.0, 1.0)
+
+    assert t_val == 42.0
+    assert actual_wvl == 1.0
+
+
+def test_get_closest_finite_time_raises_on_infinite():
+    """Test the helper raises ValueError when the closest bin is non-finite."""
+    wvl = np.array([1.0, 1.5, 2.0])
+    exptime = np.array([np.inf, 20.0, 30.0])
+
+    # 1.0 is closest to the infinite bin
+    with pytest.raises(ValueError, match="is infinite"):
+        _get_closest_finite_time(wvl, exptime, 1.0)
+
+
+def test_get_closest_finite_time_allows_inf_away_from_reference():
+    """Test that an inf at the band edge is tolerated if ref_wav is elsewhere."""
+    wvl = np.array([1.0, 1.5, 2.0])
+    exptime = np.array([np.inf, 20.0, 30.0])
+
+    # ref_wav 2.0 is far from the inf edge -> should succeed
+    t_val, actual_wvl = _get_closest_finite_time(wvl, exptime, 2.0)
+
+    assert t_val == 30.0
+    assert actual_wvl == 2.0
+
+
+# ============================================================================
+# Tests for calculate_snr_from_reference_lambda
+# ============================================================================
+
+
+@patch("pyEDITH.cli.calculate_snr")
+@patch("pyEDITH.cli.calculate_texp")
+def test_reference_snr_independent_single(
+    mock_texp, mock_snr, mock_parameters_reference
+):
+    """Mode 1: single wavelength drives its own filter (list input)."""
+    fname = mock_parameters_reference["filter_list"][0].name
+    mock_texp.return_value = (
+        {
+            fname: {
+                "wavelength": np.array([1.0, 1.5, 2.0]) * u.um,
+                "exposure_time": np.array([10.0, 20.0, 30.0]) * u.s,
+            }
+        },
+        {},
+    )
+    mock_snr.return_value = ({fname: {"snr": np.array([7.0])}}, {})
+
+    snrs, times, validation = calculate_snr_from_reference_lambda(
+        mock_parameters_reference, [1.5]
+    )
+
+    assert times == {fname: 20.0 * u.s}
+    assert mock_snr.call_args[0][1] == {fname: 20.0 * u.s}  # dict passed in independent
+    assert fname in snrs
+
+
+@patch("pyEDITH.cli.calculate_snr")
+@patch("pyEDITH.cli.calculate_texp")
+def test_reference_snr_coupled_scalar(mock_texp, mock_snr, mock_parameters_reference):
+    """Mode 3: single wavelength, scalar time applied to ALL filters."""
+    fname = mock_parameters_reference["filter_list"][0].name
+    mock_texp.return_value = (
+        {
+            fname: {
+                "wavelength": np.array([1.0, 1.5, 2.0]) * u.um,
+                "exposure_time": np.array([10.0, 20.0, 30.0]) * u.s,
+            }
+        },
+        {},
+    )
+    mock_snr.return_value = ({fname: {"snr": np.array([7.0])}}, {})
+
+    snrs, texp, validation = calculate_snr_from_reference_lambda(
+        mock_parameters_reference, 2.0, coupled=True
+    )
+
+    assert texp == 30.0 * u.s
+    assert mock_snr.call_args[0][1] == 30.0 * u.s  # scalar passed in coupled
+    assert fname in snrs
+
+
+@patch("pyEDITH.cli.calculate_snr")
+@patch("pyEDITH.cli.calculate_texp")
+def test_reference_snr_out_of_range_raises(
+    mock_texp, mock_snr, mock_parameters_reference
+):
+    """A wavelength outside every filter raises ValueError (not KeyError)."""
+    fname = mock_parameters_reference["filter_list"][0].name
+    mock_texp.return_value = (
+        {
+            fname: {
+                "wavelength": np.array([1.0, 1.5, 2.0]) * u.um,
+                "exposure_time": np.array([10.0, 20.0, 30.0]) * u.s,
+            }
+        },
+        {},
+    )
+    # 99.0 um is outside any sane filter range in the fixture
+    with pytest.raises(ValueError, match="outside every filter's range"):
+        calculate_snr_from_reference_lambda(mock_parameters_reference, [99.0])
+
+    mock_snr.assert_not_called()
+
+
+@patch("pyEDITH.cli.calculate_snr")
+@patch("pyEDITH.cli.calculate_texp")
+def test_reference_snr_warns_too_few_wavelengths(
+    mock_texp, mock_snr, mock_parameters_two_filters, caplog
+):
+    """Independent mode with fewer wavelengths than filters warns about coupled."""
+    mock_texp.return_value = (
+        {
+            "VIS": {
+                "wavelength": np.array([0.5, 0.7]) * u.um,
+                "exposure_time": np.array([10.0, 11.0]) * u.s,
+            },
+            "NIR": {
+                "wavelength": np.array([1.2, 1.5]) * u.um,
+                "exposure_time": np.array([14.0, 15.0]) * u.s,
+            },
+        },
+        {},
+    )
+    mock_snr.return_value = ({}, {})
+
+    with caplog.at_level(logging.ERROR, logger="pyEDITH"):
+        calculate_snr_from_reference_lambda(mock_parameters_two_filters, [0.5])
+
+    assert "coupled=true" in caplog.text.lower()
+
+
+@patch("pyEDITH.cli.calculate_snr")
+@patch("pyEDITH.cli.calculate_texp")
+def test_coupled_warns_on_extra_wavelengths(
+    mock_texp, mock_snr, mock_parameters_reference, caplog
+):
+    """Coupled mode with >1 wavelength warns that extras are ignored."""
+    fname = mock_parameters_reference["filter_list"][0].name
+    mock_texp.return_value = (
+        {
+            fname: {
+                "wavelength": np.array([1.0, 1.5, 2.0]) * u.um,
+                "exposure_time": np.array([10.0, 20.0, 30.0]) * u.s,
+            }
+        },
+        {},
+    )
+    mock_snr.return_value = ({fname: {"snr": np.array([7.0])}}, {})
+
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
+        # Two wavelengths in coupled mode → only the first (1.5) is used, extra warned
+        snrs, texp, _ = calculate_snr_from_reference_lambda(
+            mock_parameters_reference, [1.5, 1.8], coupled=True
+        )
+
+    # The warning fired, mentioning the ignored extras
+    assert "only the first" in caplog.text.lower()
+    assert "ignored" in caplog.text.lower()
+    # And the time came from the FIRST wavelength (1.5 → 20.0), not the second
+    assert texp == 20.0 * u.s
+
+
+@patch("pyEDITH.cli.calculate_snr")
+@patch("pyEDITH.cli.calculate_texp")
+def test_coupled_out_of_range_raises(mock_texp, mock_snr, mock_parameters_reference):
+    """Coupled mode with a wavelength outside every filter raises ValueError (line 375)."""
+    fname = mock_parameters_reference["filter_list"][0].name
+    mock_texp.return_value = (
+        {
+            fname: {
+                "wavelength": np.array([1.0, 1.5, 2.0]) * u.um,
+                "exposure_time": np.array([10.0, 20.0, 30.0]) * u.s,
+            }
+        },
+        {},
+    )
+    # 99.0 um is outside the F150W filter (1.0–2.0 µm)
+    with pytest.raises(ValueError, match="outside every filter's range"):
+        calculate_snr_from_reference_lambda(
+            mock_parameters_reference, 99.0, coupled=True
+        )
+
+    mock_snr.assert_not_called()
+
+
+@patch("pyEDITH.cli.calculate_snr")
+@patch("pyEDITH.cli.calculate_texp")
+def test_single_filter_coupled_matches_independent(
+    mock_texp, mock_snr, mock_parameters_reference
+):
+    """For one filter, scalar-coupled and single-element-list-independent agree."""
+    fname = mock_parameters_reference["filter_list"][0].name
+    texp_fixture = (
+        {
+            fname: {
+                "wavelength": np.array([1.0, 1.5, 2.0]) * u.um,
+                "exposure_time": np.array([10.0, 20.0, 30.0]) * u.s,
+            }
+        },
+        {},
+    )
+    mock_texp.return_value = texp_fixture
+    mock_snr.return_value = ({fname: {"snr": np.array([7.0])}}, {})
+
+    _, t_coupled, _ = calculate_snr_from_reference_lambda(
+        mock_parameters_reference, 1.5, coupled=True
+    )
+    _, t_independent, _ = calculate_snr_from_reference_lambda(
+        mock_parameters_reference, [1.5]
+    )
+
+    # Same driving time—coupled returns a scalar, independent a dict of one
+    assert t_coupled == 20.0 * u.s
+    assert t_independent == {fname: 20.0 * u.s}
+    assert t_coupled == t_independent[fname]

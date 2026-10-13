@@ -1,17 +1,17 @@
+from astropy.units import Quantity
+
 from pyEDITH import AstrophysicalScene, Observation, Observatory
 from pyEDITH import calculate_exposure_time_or_snr, parse_input
 from argparse import ArgumentParser
 import numpy as np
+from typing import Union
 from .units import *
 import sys
 from . import set_verbosity
-import os
+import os, copy
 import logging
 
 logger = logging.getLogger("pyEDITH")
-
-# Declare the environment variable
-# os.environ["SCI_ENG_DIR"] = "/path/to/Sci-Eng-Interface/hwo_sci_eng"
 
 
 def main():
@@ -22,18 +22,18 @@ def main():
     of different subcommands: etc (Exposure Time Calculator), snr (Signal-to-Noise
     Ratio), and etc2snr (Exposure Time to Signal-to-Noise Ratio).
 
-    The function reads configuration from .edith files and calls the appropriate
-    calculation functions based on the subcommand.
+    The etc2snr subcommand supports two modes:
+    - Coupled (--ref_lambda): A single wavelength drives one exposure time
+      applied to all filters.
+    - Independent (--ref_lambdas): Each filter is driven by its own reference
+      wavelength and evaluated independently.
 
     Raises
     ------
     SyntaxError
         If required command-line arguments are missing
-    TypeError
-        If multiple wavelengths are provided for primary lambda in etc2snr mode
     ValueError
-        If secondary parameters are not specified in etc2snr mode or
-        if the returned exposure time is infinity
+        If no reference wavelength option is specified in etc2snr mode
     """
     parent_parser = ArgumentParser(add_help=False)
     parent_parser.add_argument(
@@ -82,10 +82,23 @@ def main():
 
     parser_c = subparsers.add_parser(
         "etc2snr",
-        help="SNR calculator for a secondary lambda based on an exposure file \
-            calculated on a primary lambda (in .edith file)",
+        help="SNR calculator derived from an ETC calculation at a reference wavelength",
     )
     parser_c.add_argument("--edith", type=str, help="an .edith file")
+    parser_c.add_argument(
+        "--ref_lambda",
+        nargs="+",  # one OR more values → always a list
+        type=float,  # argparse converts each token to float for you
+        help="Reference wavelength(s) in microns. Provide one value with "
+        "--coupled to drive all filters from a single wavelength, or "
+        "several values for independent per-filter targets.",
+    )
+    parser_c.add_argument(
+        "--coupled",
+        action="store_true",  # boolean flag; absent → False, present → True
+        help="Use a single reference wavelength to drive the exposure time "
+        "for ALL filters simultaneously (e.g. dichroic splits).",
+    )
 
     args = parser.parse_args()
 
@@ -118,33 +131,31 @@ def main():
         print(snr)
 
     elif args.subfunction == "etc2snr":
+
         if not args.edith:
             raise SyntaxError("--edith argument is required for etc2snr subfunction.")
 
-        parameters, secondary_parameters = parse_input.read_configuration(
-            args.edith, secondary_flag=True
+        parameters, _ = parse_input.read_configuration(args.edith)
+
+        if not args.ref_lambda:
+            raise ValueError(
+                "etc2snr requires --ref_lambda to specify the reference "
+                "wavelength(s). Use one value with --coupled to drive all "
+                "filters from a single wavelength, or several values for "
+                "independent per-filter targets."
+            )
+
+        reference = [float(x) for x in args.ref_lambda]
+
+        mode = "COUPLED" if args.coupled else "INDEPENDENT"
+        logger.info(f"Executing {mode} etc2snr workflow")
+
+        snrs, texps, _ = calculate_snr_from_reference_lambda(
+            parameters, reference, coupled=args.coupled
         )
 
-        if not secondary_parameters:
-            raise ValueError("The secondary parameters are not specified.")
-
-        if len(parameters["wavelength"]) > 1:
-            raise TypeError("Cannot accept multiple lambdas as primary lambda")
-        else:
-            for key in parameters:
-                if key not in secondary_parameters:
-                    secondary_parameters[key] = parameters[key]
-
-        logger.info("Calculating texp from primary lambda")
-        logger.info(parameters.keys())
-        texp, _ = calculate_texp(parameters)
-        print("Reference exposure time: ", texp)
-        if np.isfinite(texp).all():
-            logger.info("Calculating snr on secondary lambda")
-            snr, _ = calculate_snr(secondary_parameters, texp)
-            print("SNR at the secondary lambda: ", snr)
-        else:
-            raise ValueError("Returned exposure time is infinity.")
+        print(f"{mode} exposure time(s): ", texps)
+        print(f"{mode} SNRs: ", snrs)
     else:
         parser.print_help()
 
@@ -168,50 +179,36 @@ def calculate_texp(parameters: dict, ETC_validation: bool = False) -> tuple[dict
     Returns
     -------
     tuple[dict, dict]
-        A tuple containing:
-
         results : dict
             Dictionary with filter names as keys, each containing:
             - 'wavelength': wavelength array
             - 'exposure_time': exposure time array for each wavelength
-
         validation_variables : dict
             Dictionary with filter names as keys, containing validation variables
-            with intermediate calculation results
-
     """
-
-    # Read Filter list
     filters = parse_input.parse_filters(parameters)
 
     results = {}
     validation_variables = {}
-    # Loop by filter
     for f in filters:
         logger.info("Running pyEDITH for Filter: " + f.name)
-        # Define Observation and load relevant parameters
         observation = Observation()
         observation.load_configuration(parameters, filter=f)
         observation.set_output_arrays()
         observation.validate_configuration()
 
-        # Define Astrophysical Scene and load relevant parameters,
-        # then calculate zodi/exozodi
         scene = AstrophysicalScene()
         scene.load_configuration(parameters)
         scene.calculate_zodi_exozodi(parameters)
         scene.validate_configuration()
-        if parameters["observing_mode"] == "IFS":
-            scene.regrid_spectra(observation)
+        scene.regrid_spectra(observation)
 
-        # Create and configure Observatory
         observatory_config = parse_input.get_observatory_config(parameters)
         observatory = Observatory()
         observatory.create_observatory(observatory_config)
         observatory.load_configuration(parameters, observation, scene)
         observatory.validate_configuration()
 
-        # EXPOSURE TIME CALCULATION
         calculate_exposure_time_or_snr(
             observation,
             scene,
@@ -229,7 +226,9 @@ def calculate_texp(parameters: dict, ETC_validation: bool = False) -> tuple[dict
     return results, validation_variables
 
 
-def calculate_snr(parameters: dict, reference_texp: float) -> tuple[dict, dict]:
+def calculate_snr(
+    parameters: dict, reference_texp: Union[float, dict]
+) -> tuple[dict, dict]:
     """
     Calculate signal-to-noise ratio for a given exposure time.
 
@@ -241,60 +240,58 @@ def calculate_snr(parameters: dict, reference_texp: float) -> tuple[dict, dict]:
     ----------
     parameters : dict
         Dictionary containing all input parameters for the calculation
-    reference_texp : float
-        Reference exposure time in seconds
+    reference_texp : float or dict
+        Reference exposure time. If a scalar, the same time is applied to all
+        filters (coupled mode). If a dict mapping filter names to times, each
+        filter uses its own time (independent mode).
 
     Returns
     -------
     tuple[dict, dict]
-        A tuple containing:
-
         results : dict
             Dictionary with filter names as keys, each containing:
             - 'wavelength': wavelength array
             - 'snr': signal-to-noise ratio array for each wavelength
-
         validation_variables : dict
             Dictionary with filter names as keys, containing validation variables
-            with intermediate calculation results
-
     """
-
-    # Read Filter list
     filters = parse_input.parse_filters(parameters)
 
     results = {}
     validation_variables = {}
-    # Loop by filter
+
     for f in filters:
         logger.info("Running pyEDITH for Filter: " + f.name)
-
-        # Define Observation and load relevant parameters
         observation = Observation()
         observation.load_configuration(parameters, filter=f)
         observation.set_output_arrays()
 
-        # Define Astrophysical Scene and load relevant parameters,
-        # then calculate zodi/exozodi
         scene = AstrophysicalScene()
         scene.load_configuration(parameters)
         scene.calculate_zodi_exozodi(parameters)
 
-        if parameters["observing_mode"] == "IFS":
-            scene.regrid_spectra(observation)
+        scene.regrid_spectra(observation)
 
-        # Create and configure Observatory
         observatory_config = parse_input.get_observatory_config(parameters)
         observatory = Observatory()
         observatory.create_observatory(observatory_config)
         observatory.load_configuration(parameters, observation, scene)
         observatory.validate_configuration()
 
-        # SNR CALCULATION
-        observation.obstime = reference_texp
+        # Handle independent times (dict) vs coupled time (scalar)
+        if isinstance(reference_texp, dict):
+            if f.name not in reference_texp:
+                raise KeyError(
+                    f"Filter '{f.name}' not found in the provided exposure time dict."
+                )
+            observation.obstime = reference_texp[f.name]
+        else:
+            observation.obstime = reference_texp
+
         calculate_exposure_time_or_snr(
             observation, scene, observatory, mode="signal_to_noise"
         )
+
         results[f.name] = {
             "wavelength": observation.wavelength,
             "snr": observation.fullsnr,
@@ -302,3 +299,116 @@ def calculate_snr(parameters: dict, reference_texp: float) -> tuple[dict, dict]:
         validation_variables[f.name] = observation.validation_variables
 
     return results, validation_variables
+
+
+def _get_closest_finite_time(wvl_array, exptime_array, ref_wav):
+    """
+    Internal helper to find the valid exposure time at the wavelength
+    closest to ref_wav.
+
+    Searches the provided wavelength grid for the bin nearest to ref_wav and
+    returns the corresponding exposure time. Raises an error if the closest
+    point is non-finite (e.g. zero transmission at the band edge).
+
+    Parameters
+    ----------
+    wvl_array : array-like
+        Wavelength grid for the filter.
+    exptime_array : array-like
+        Exposure times corresponding to each wavelength bin.
+    ref_wav : float or astropy.units.Quantity
+        The reference wavelength to match against.
+
+    Returns
+    -------
+    t_val : float or astropy.units.Quantity
+        The exposure time at the closest wavelength bin.
+    actual_wvl : float or astropy.units.Quantity
+        The actual wavelength of the matched bin.
+
+    Raises
+    ------
+    ValueError
+        If the exposure time at the closest wavelength is infinite or NaN.
+    """
+    wvl_array = np.atleast_1d(wvl_array)
+    exptime_array = np.atleast_1d(exptime_array)
+
+    idx = np.argmin(np.abs(wvl_array - ref_wav))
+    t_val = exptime_array[idx]
+
+    if not np.isfinite(t_val):
+        raise ValueError(
+            f"Exposure time at the wavelength closest to {ref_wav} is infinite. "
+            "This usually indicates zero transmission at this wavelength."
+        )
+    return t_val, wvl_array[idx]
+
+
+def calculate_snr_from_reference_lambda(parameters, reference, coupled=False):
+    if not isinstance(reference, (list, tuple)):
+        reference = [reference]
+
+    # Ensure each element is a wavelength quantity
+    converted_reference = []
+    for ref in reference:
+        converted_reference.append(
+            ref.to(WAVELENGTH) if isinstance(ref, u.Quantity) else ref * WAVELENGTH
+        )
+
+    reference = converted_reference
+
+    filters = parameters["filter_list"]
+
+    texp_results, _ = calculate_texp(parameters)
+
+    if coupled:
+        ref = reference[0]
+        if len(reference) > 1:
+            logger.warning(
+                f"Coupled mode uses only the first wavelength ({ref}); "
+                f"the remaining {len(reference) - 1} were ignored."
+            )
+        filt = next((f for f in filters if f.contains(ref)), None)
+        if filt is None:
+            raise ValueError(f"Wavelength {ref} is outside every filter's range.")
+
+        texp_scalar, actual = _get_closest_finite_time(
+            texp_results[filt.name]["wavelength"],
+            texp_results[filt.name]["exposure_time"],
+            ref,
+        )
+        logger.info(f"Coupled time driven by lambda={actual}: {texp_scalar}")
+
+        snr_results, validation = calculate_snr(parameters, texp_scalar)
+
+        return snr_results, texp_scalar, validation
+
+    # --- Independent mode ---
+    # Guard against the classic "meant to use coupled" mistake:
+    # fewer wavelengths than filters means some filters have no time.
+    if len(reference) < len(filters):
+        logger.error(
+            f"Independent mode: you provided {len(reference)} wavelength(s) "
+            f"but the configuration has {len(filters)} filter(s). Each filter "
+            f"needs its own target wavelength in this mode. "
+            f"If you intended a single wavelength to drive the exposure time "
+            f"for ALL filters, pass coupled=True instead."
+        )
+
+    times = {}
+    for l in reference:
+        filt = next((f for f in filters if f.contains(l)), None)
+        if filt is None:
+            raise ValueError(f"Wavelength {l} is outside every filter's range.")
+
+        t_val, actual = _get_closest_finite_time(
+            texp_results[filt.name]["wavelength"],
+            texp_results[filt.name]["exposure_time"],
+            l,
+        )
+        times[filt.name] = t_val
+        logger.info(f"Filter '{filt.name}' time driven by lambda={actual}: {t_val}")
+
+    snr_results, validation = calculate_snr(parameters, times)
+    return snr_results, times, validation
