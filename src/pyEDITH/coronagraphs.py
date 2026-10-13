@@ -105,7 +105,7 @@ class Coronagraph(ABC):
 
     This class defines the basic structure and methods common to all coronagraphs.
     Specific coronagraph models should inherit from this class and implement
-    their own `generate_secondary_parameters` method.
+    their own methods.
     Right now, there are two coronagraph sub-classes:
 
         -> **ToyModelCoronagraph**
