@@ -11,6 +11,15 @@ import logging
 
 logger = logging.getLogger("pyEDITH")
 
+# The legacy primary/secondary ("reference lambda") format predates Filter
+# objects. In the original published pyEDITH code there was a single
+# `bandwidth` doing double duty: the coronagraph bandwidth AND the implicit
+# photometric band width of each reference measurement. Its hardcoded default
+# was 0.2. We preserve that value here so the *published* input file (which
+# omits `bandwidth` entirely) reproduces the paper's results verbatim. New,
+# multi-filter work should use the filter_* syntax and specify widths explicitly.
+LEGACY_DEFAULT_BANDWIDTH = 0.2
+
 
 def parse_input_file(file_path: Union[Path, str]) -> dict:
     """
@@ -281,10 +290,14 @@ def parse_input_file(file_path: Union[Path, str]) -> dict:
 
         bandwidth = variables.get("bandwidth")
         if bandwidth is None:
-            raise KeyError(
-                "Legacy secondary mode requires 'bandwidth' to define the width "
-                "of each band's top-hat."
+            bandwidth = LEGACY_DEFAULT_BANDWIDTH
+            logger.info(
+                f"Legacy secondary ('reference lambda') mode: no 'bandwidth' "
+                f"supplied; defaulting each band's top-hat width to the historical "
+                f"value {LEGACY_DEFAULT_BANDWIDTH} (the original coronagraph/filter "
+                f"bandwidth), to reproduce the published behaviour."
             )
+            variables["bandwidth"] = bandwidth
 
         # (2) Build one Filter per band. These define the band edges we paint over.
         # Resolution = None is fine because we are enforcing IMAGING mode.
@@ -777,6 +790,14 @@ def parse_parameters(parameters: dict) -> dict:
             if overrides_list:
                 parsed_params["overrides"] = overrides_list
 
+    # Canonical objects that parse_parameters does not *transform* but must not
+    # *drop*. They are produced upstream by parse_input_file (or passed directly
+    # in the Python API) and consumed downstream.
+    PASSTHROUGH_KEYS = ("filter_list",)
+    for key in PASSTHROUGH_KEYS:
+        if key in parameters:
+            parsed_params[key] = parameters[key]
+
     # Update _parsed key
     parsed_params["_parsed"] = True
     return parsed_params
@@ -888,13 +909,26 @@ def _build_legacy_filters(parameters, input_wls):
 
     if mode == "IMAGER":
         center = input_wls if input_wls.isscalar else input_wls.flat[0]
+
+        # If no bandwidth, fall back to the historical 0.2.
+        #  We WARN (not merely info) because two deprecated things are
+        # happening at once: the legacy scalar path is being used AND a bandwidth
+        # is being fabricated. The modern filter_* path, by contrast, demands an
+        # explicit bandwidth.
+        bandwidth = parameters.get("bandwidth")
+        if bandwidth is None:
+            bandwidth = LEGACY_DEFAULT_BANDWIDTH
+            logger.warning(
+                f"Legacy IMAGER path: no 'bandwidth' supplied; defaulting to the "
+                f"historical value {LEGACY_DEFAULT_BANDWIDTH}. Specify 'bandwidth' "
+                f"explicitly, or switch to the modern filter_* syntax, to silence "
+                f"this warning."
+            )
         active.append(
             Filter(
-                name=str(np.round(center.value, 1))
-                + " BW "
-                + str(parameters["bandwidth"]),
+                name=str(np.round(center.value, 1)) + " BW " + str(bandwidth),
                 center=center,
-                bandwidth=parameters["bandwidth"],
+                bandwidth=bandwidth,
                 type="IMAGER",
             )
         )

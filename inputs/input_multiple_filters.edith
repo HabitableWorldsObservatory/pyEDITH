@@ -1,0 +1,43 @@
+;=====================================================================
+; pyEDITH input file -- NEW filter-based notation
+; Reproduces the Figure A1 scenario (Alei, Currie et al. 2026):
+;   S/N = 7 target at a 0.5 um reference, evaluated at two bandpasses
+;   (primary 0.5 um, secondary 1.0 um), bright planet at 0.062" and
+;   14.8 pc around a HIP 77052-like star.
+;
+; Comments start with ';'. Arrays use [ ]. Scalars are NOT one-element
+; arrays. Variable names cannot be changed.
+;=====================================================================
+
+;--- INPUT SPECTRUM (grid + sampled flux; must span every filter) ----
+; wavelength is the SPECTRAL GRID the filters sample from -- not a list
+; of bandpasses. Fstar_10pc and Fp/Fs are the spectrum on that grid and
+; MUST have the same length as wavelength.
+wavelength  = [0.5, 1.0]            ; spectral grid (micron)
+Fstar_10pc  = [1.128e+02, 1.102e+02] ; stellar flux on grid (ph/s/cm^2/nm)
+Fp/Fs       = [6.3e-8, 6.4e-8]       ; planet contrast on grid
+
+;--- OBSERVATIONAL PARAMETERS ---
+snr             = 7.0               ; S/N target at the reference wavelength
+CRb_multiplier  = 2.                ; background multiplier
+psf_trunc_ratio = 0.35              ; PSF truncation ratio
+
+;--- STAR PARAMETERS ---
+distance       = 14.8               ; distance (pc)
+FstarV_10pc    = 1.244e+02          ; V-band flux (ph/s/cm^2/nm)
+stellar_radius = 0.95               ; stellar radius (R_sun)
+nzodis         = 3.0                ; exozodi level (zodis)
+ra             = 236.0075773682300  ; RA (deg)
+dec            = 02.5151668316500   ; Dec (deg)
+
+;--- PLANET PARAMETERS ---
+separation = 0.062                  ; planet separation (arcsec)
+
+;--- OBSERVATORY PARAMETERS ---
+observatory_preset = EAC1
+observing_mode     = IMAGER
+
+;--- FILTERS ---
+filter_name      = ['primary', 'secondary']
+filter_center    = [0.5, 1.0]       ; (micron)
+filter_bandwidth = [0.2, 0.2]      

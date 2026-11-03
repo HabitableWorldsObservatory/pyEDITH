@@ -12,10 +12,10 @@
 ;--------------------------------
 
 ;--- OBSERVATIONAL PARAMETERS ---
-photometric_aperture_radius = 0.85          ; photometric aperture radius used for plots and some basic exp time estimates, recommended = 0.7 l/D_inscribed ~ 0.85 l/D
 wavelength = 0.5                            ; wavelength (micron)
 snr = 7.0                                   ; signal-to-noise ratio at desired wavelength {same length as wavelength} 
 CRb_multiplier  = 2.                        ; factor to multiply to remove background
+photometric_aperture_radius = 0.85          ; photometric aperture radius used for plots and some basic exp time estimates, recommended = 0.7 l/D_inscribed ~ 0.85 l/D
 
 ;--- STAR PARAMETERS ---
 distance = 10.                              ; distance to star (pc)
@@ -33,3 +33,9 @@ Fp/Fs =  1e-10                              ; planet contrast at desired wavelen
 ;--- OBSERVATORY PARAMETERS ---
 observatory_preset = ToyModel
 observing_mode =  IMAGER
+T_optical = 0.85                             ; optical throughput. Needs to be provided in ToyModel
+
+;--- FILTERS ---
+filter_name      = toy_filter
+filter_center    = 0.5
+filter_bandwidth = 0.2
