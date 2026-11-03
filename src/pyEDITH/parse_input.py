@@ -12,36 +12,37 @@ import logging
 logger = logging.getLogger("pyEDITH")
 
 
-def parse_input_file(
-    file_path: Union[Path, str], secondary_flag: bool
-) -> Tuple[Dict, Dict]:
+def parse_input_file(file_path: Union[Path, str]) -> dict:
     """
     Parse an input file and extract variables and secondary variables.
 
     This function reads a configuration file, processes its contents line by line,
     and extracts primary and optional secondary variables. It handles various data
     types including arrays, strings, and numeric values, and performs special
-    processing for IFS observing mode parameters. The function handles various data types including arrays, strings, and numbers.
+    processing for IFS observing mode parameters.
+
+    The legacy primary/secondary format (a single primary block plus a mirrored
+    ``secondary_*`` block, as published in the original pyEDITH paper) is retained
+    for backward compatibility. When present, it is translated internally into the
+    canonical representation: a ``filter_list`` of Filter objects plus parallel,
+    piecewise-constant wavelength-dependent arrays. Each legacy band contributes a
+    flat (top-hat) value across its own bandpass, so that the measured datasets are
+    faithfully represented and nothing downstream needs to know the legacy syntax
+    exists. For new, multi-filter work, prefer the ``filter_*`` syntax directly.
+
     Comments in the input file should start with ';'.
 
     Parameters
     ----------
     file_path : Union[Path, str]
         Path to the input file
-    secondary_flag : bool
-        Flag indicating whether secondary variables are expected
 
     Returns
     -------
-    Tuple[Dict, Dict]
-        A tuple containing two dictionaries:
-
-        variables: dict
-            Primary variables extracted from the file
-
-        secondary_variables: dict
-            Secondary variables extracted from the file
-            (any non-specified variable will be the same as in the variables dictionary)
+    variables: dict
+        Primary variables extracted from the file. When a legacy secondary
+        block is translated, this additionally contains a synthesised
+        ``filter_list`` and piecewise-constant wavelength-dependent arrays.
 
     Raises
     ------
@@ -50,9 +51,34 @@ def parse_input_file(
     FileNotFoundError
         If a specified spectrum file cannot be found
     ValueError
-        If there are issues with the spectrum file
-
+        If there are issues with the spectrum file, if both the legacy
+        ``secondary_*`` and modern ``filter_*`` syntaxes are used in the same
+        file, or if the legacy primary/secondary bands overlap.
     """
+    # Parameters that are physically wavelength-dependent and may therefore differ
+    # between the legacy primary and secondary blocks. Anything a secondary_* key
+    # tries to override that is NOT in this set is warned about and discarded.
+    # This is the single source of truth; the IFS block below references it too.
+    WAVELENGTH_DEPENDENT_PARAMS = (
+        "wavelength",
+        "Fstar_10pc",
+        "Fp/Fs",
+        "snr",
+        "T_optical",
+        "epswarmTrcold",
+        "DC",
+        "RN",
+        "tread",
+        "CIC",
+        "QE",
+        "dQE",
+        "IFS_eff",
+        "mag",  # used to be [ntargs x nlambda], now just [nlambda]
+        "ez_PPF",
+        "delta_mag",  # used to be [nmeananom x norbits x ntargs]
+        "F0",  # for validation purposes, the calculation of F0 is different in AYO
+        "det_npix_input",  # for validation purposes
+    )
 
     def _parse_array_value(raw_items: str) -> list:
         """
@@ -124,17 +150,9 @@ def parse_input_file(
 
             if "secondary" in key:
                 has_secondary = True
-                if secondary_flag:
-                    secondary_variables[key[10:]] = (
-                        value  # it replaces the default value
-                    )
+                secondary_variables[key[10:]] = value  # it replaces the default value
             else:
                 variables[key] = value
-
-    if secondary_flag and not has_secondary:
-        raise KeyError(
-            "Secondary flag is True but no secondary variables found in the input file."
-        )
 
     # Check that observing_mode is present and valid
     if "observing_mode" not in variables:
@@ -144,6 +162,16 @@ def parse_input_file(
     if variables["observing_mode"] not in ["IMAGER", "IFS"]:
         raise ValueError(
             f"Invalid observing mode '{variables['observing_mode']}'. Must be 'IMAGER' or 'IFS'."
+        )
+
+    # Legacy secondary_* is an IMAGER-only format. Reject non-IMAGER here,
+    # BEFORE the IFS block, so the user gets a message about the real problem
+    # (secondary_* in the wrong mode) rather than a confusing IFS "missing
+    # required columns" error from a gate that happens to fire first.
+    if has_secondary and variables["observing_mode"] != "IMAGER":
+        raise KeyError(
+            'Legacy secondary mode only works in "IMAGER" mode. '
+            "Use filter_* for IFS mode."
         )
 
     # Handle IFS mode
@@ -200,12 +228,133 @@ def parse_input_file(
                 "Required parameters 'wavelength', 'Fstar_10pc', and 'Fp/Fs' are not provided. Please write them explicitly or provide a spectrum_file path."
             )
 
-    if variables.get("observing_mode") == "IMAGER" and isinstance(
-        variables["wavelength"], list
-    ):
-        raise KeyError(
-            "In IMAGER mode you can only use one wavelength at a time. If you are simulating photometry, please run every single wavelength separately. If you want to model a spectrum, please use IFS mode."
-        )
+    # ------------------------------------------------------------------
+    # LEGACY primary/secondary -> canonical (filter_list + piecewise-constant
+    # wavelength-dependent arrays).
+    #
+    # The published 'secondary_*' format is a two-band photometric
+    # specification: a value is asserted flat across each band. We transcribe
+    # it faithfully by (1) building one Filter per band, and (2) painting each
+    # wavelength-dependent parameter as a TOP-HAT across its own bandpass. The
+    # resulting 'wavelength' array is the measurement sampling grid (its
+    # documented meaning), so every downstream resample onto a filter's grid
+    # lands between two identical samples -> flat value, no interp1d bounds
+    # error, and no fabricated spectral slope between the two unrelated bands.
+    #
+    # This runs BEFORE the modern filter_* block so the two syntaxes remain
+    # mutually exclusive and the synthesised filter_list is not overwritten.
+    # The legacy mode is accepted only for IMAGER observing mode.
+    # ------------------------------------------------------------------
+    if has_secondary:
+
+        filter_keys_present_early = any(key.startswith("filter_") for key in variables)
+        if filter_keys_present_early:
+            raise ValueError(
+                "An input file may use either the legacy secondary_* parameters "
+                "or the filter_* parameters, not both. Use filter_* for new, "
+                "multi-filter runs; secondary_* is retained only for backward "
+                "compatibility with the originally published format."
+            )
+
+        # (1) Warn-and-drop any secondary override that is not wavelength-dependent.
+        for key in list(secondary_variables.keys()):
+            if key not in WAVELENGTH_DEPENDENT_PARAMS:
+                logger.warning(
+                    f"'secondary_{key}' is not a wavelength-dependent parameter "
+                    f"and cannot differ between the primary and secondary band; "
+                    f"it will be ignored. (Wavelength-dependent parameters are: "
+                    f"{', '.join(WAVELENGTH_DEPENDENT_PARAMS)}.)"
+                )
+                secondary_variables.pop(key)
+
+        if "wavelength" not in variables:
+            raise KeyError(
+                "Legacy secondary mode requires a primary 'wavelength' to define "
+                "the first band."
+            )
+        if "wavelength" not in secondary_variables:
+            raise KeyError(
+                "Legacy secondary mode requires 'secondary_wavelength' to define "
+                "the second band."
+            )
+        observing_mode = variables["observing_mode"]
+
+        bandwidth = variables.get("bandwidth")
+        if bandwidth is None:
+            raise KeyError(
+                "Legacy secondary mode requires 'bandwidth' to define the width "
+                "of each band's top-hat."
+            )
+
+        # (2) Build one Filter per band. These define the band edges we paint over.
+        # Resolution = None is fine because we are enforcing IMAGING mode.
+        prim_wl = variables["wavelength"]
+        sec_wl = secondary_variables["wavelength"]
+        filters = [
+            Filter(
+                "primary",
+                center=prim_wl * u.um,
+                bandwidth=bandwidth,
+                resolution=None,
+                type=observing_mode,
+            ),
+            Filter(
+                "secondary",
+                center=sec_wl * u.um,
+                bandwidth=bandwidth,
+                resolution=None,
+                type=observing_mode,
+            ),
+        ]
+
+        # Resolve each band's edges (in WAVELENGTH units) directly from the
+        # Filter objects, so the sampling grid always matches the grid the
+        # filters will actually query during resampling.
+        lo0 = filters[0].low.to(u.um).value
+        hi0 = filters[0].high.to(u.um).value
+        lo1 = filters[1].low.to(u.um).value
+        hi1 = filters[1].high.to(u.um).value
+
+        # Guard against overlapping / out-of-order bands: a flat per-band value
+        # cannot be defined unambiguously if the bandpasses intersect.
+        if not hi0 < lo1:
+            raise ValueError(
+                f"Legacy primary band [{lo0}, {hi0}] um and secondary band "
+                f"[{lo1}, {hi1}] um overlap or are out of order. The two "
+                f"wavelengths must define non-overlapping bandpasses."
+            )
+
+        # (3) Paint each wavelength-dependent parameter flat across its own band.
+        #     Two samples per band, each carrying that band's value, nudged just
+        #     beyond the edges so every in-band query point lies strictly between
+        #     two identical samples (no interp1d bounds error at the edges).
+        eps = 1e-9  # guard against floating-point equality at the boundary
+        band_edges = [(lo0, hi0), (lo1, hi1)]
+
+        sampled_wl = []
+        for lo, hi in band_edges:
+            sampled_wl.extend([lo - eps, hi + eps])
+        variables["wavelength"] = sampled_wl
+
+        for key in WAVELENGTH_DEPENDENT_PARAMS:
+            if key == "wavelength":
+                continue  # handled above as the sampling grid itself
+            prim_value = variables.get(key)
+            if prim_value is None:
+                # Parameter not present at all in the primary block; nothing to
+                # paint. Default values will likely be used.
+                continue
+            # If the secondary block overrode this key use its value for the
+            # secondary band; otherwise the secondary band inherits the primary
+            # value (flat across both bands).
+            sec_value = secondary_variables.get(key, prim_value)
+            # Two samples per band, flat: [prim, prim, sec, sec]
+            variables[key] = [prim_value, prim_value, sec_value, sec_value]
+
+        # Publish the synthesised filter list and fully dissolve the legacy
+        # secondary block: downstream now sees only the canonical form.
+        variables["filter_list"] = filters
+        secondary_variables.clear()
 
     # ------------------------------------------------------------------
     # Handle Filters feature: reconstruct Filter objects from parallel
@@ -215,8 +364,19 @@ def parse_input_file(
     # resolution is optional for IMAGER but required for IFS, matching
     # the fact that resolution is only physically meaningful for a
     # spectrograph.
-    # ------------------------------------------------------------------
-    filter_keys_present = [key for key in variables if key.startswith("filter_")]
+
+    # Modern filter_* input keys only — exclude already-synthesised outputs
+    # like 'filter_list' (produced by the legacy shim above), which share the
+    # 'filter_' prefix but are NOT user-supplied filter specifications.
+    _filter_input_keys = {
+        "filter_name",
+        "filter_center",
+        "filter_bandwidth",
+        "filter_low",
+        "filter_high",
+        "filter_resolution",
+    }
+    filter_keys_present = [key for key in variables if key in _filter_input_keys]
 
     if filter_keys_present:
         if "filter_name" not in variables:
@@ -297,7 +457,7 @@ def parse_input_file(
 
         variables["filter_list"] = filter_list
 
-    return variables, secondary_variables
+    return variables
 
 
 def normalize_list_shapes(parameters, key, default_len=1):
@@ -792,47 +952,6 @@ def _build_legacy_filters(parameters, input_wls):
             )
 
     return active
-
-
-def read_configuration(
-    input_file: Union[Path, str], secondary_flag: bool = False
-) -> Tuple[Dict, Dict]:
-    """
-    Read and parse configuration from an input file.
-
-    This function reads the input file, extracts parameters, and then parses both
-    the primary and secondary parameters. It serves as a high-level wrapper around
-    parse_input_file() and parse_parameters().
-
-    Parameters
-    ----------
-    input_file : Union[Path, str]
-        Path to the input configuration file
-    secondary_flag : bool, optional
-        Flag indicating whether secondary variables should be processed, default is False
-
-    Returns
-    -------
-    Tuple[Dict, Dict]
-        A tuple containing two dictionaries:
-
-        parsed_parameters: dict
-            Parsed primary parameters
-
-        parsed_secondary_parameters: dict
-            Parsed secondary parameters (empty if secondary_flag is False)
-    """
-
-    parameters, secondary_parameters = parse_input_file(input_file, secondary_flag)
-    parsed_parameters = parse_parameters(parameters)
-
-    if secondary_flag:
-        # Parse secondary parameters
-        parsed_secondary_parameters = parse_parameters(secondary_parameters)
-    else:
-        parsed_secondary_parameters = {}
-
-    return parsed_parameters, parsed_secondary_parameters
 
 
 def get_observatory_config(parameters: Dict[str, str]) -> Union[str, Dict[str, str]]:

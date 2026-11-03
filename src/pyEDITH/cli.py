@@ -1,11 +1,11 @@
-from astropy.units import Quantity
+import astropy.units as u
 
 from pyEDITH import AstrophysicalScene, Observation, Observatory
 from pyEDITH import calculate_exposure_time_or_snr, parse_input
 from argparse import ArgumentParser
 import numpy as np
 from typing import Union
-from .units import *
+from .units import WAVELENGTH, TIME
 import sys
 from . import set_verbosity
 import os, copy
@@ -23,10 +23,10 @@ def main():
     Ratio), and etc2snr (Exposure Time to Signal-to-Noise Ratio).
 
     The etc2snr subcommand supports two modes:
-    - Coupled (--ref_lambda): A single wavelength drives one exposure time
-      applied to all filters.
-    - Independent (--ref_lambdas): Each filter is driven by its own reference
-      wavelength and evaluated independently.
+    - Coupled (--ref_lambda): A single wavelength drives one exposure time applied to
+    all filters.
+    - Independent (--ref_lambdas): Each filter is driven by its own reference wavelength
+    and evaluated independently.
 
     Raises
     ------
@@ -111,31 +111,31 @@ def main():
     else:  # args.verbose >= 2
         set_verbosity("debug")  # -vv, -vvv, etc.
 
-    if args.subfunction == "etc":
-        if not args.edith:
-            raise SyntaxError("--edith argument is required for etc subfunction.")
+    # Guard: no subcommand chosen -> show help and return.
+    if args.subfunction is None:
+        parser.print_help()
+        return
 
-        parameters, _ = parse_input.read_configuration(args.edith)
-        texp, _ = calculate_texp(parameters)
+    if not args.edith:
+        raise SyntaxError("--edith argument is required.")
+
+    parameters = parse_input.parse_input_file(args.edith)
+    parsed_parameters = parse_input.parse_parameters(parameters)
+
+    if args.subfunction == "etc":
+
+        texp, _ = calculate_texp(parsed_parameters)
         print(texp)
 
     elif args.subfunction == "snr":
-        if not args.edith or args.time is None:
-            raise SyntaxError(
-                "Both --edith and --time arguments are required for snr subfunction."
-            )
+        if args.time is None:
+            raise SyntaxError("--time argument is required for snr subfunction.")
 
-        parameters, _ = parse_input.read_configuration(args.edith)
         texp = args.time * TIME
-        snr, _ = calculate_snr(parameters, texp)
+        snr, _ = calculate_snr(parsed_parameters, texp)
         print(snr)
 
-    elif args.subfunction == "etc2snr":
-
-        if not args.edith:
-            raise SyntaxError("--edith argument is required for etc2snr subfunction.")
-
-        parameters, _ = parse_input.read_configuration(args.edith)
+    else:  # args.subfunction == "etc2snr" — the only remaining possibility
 
         if not args.ref_lambda:
             raise ValueError(
@@ -151,13 +151,11 @@ def main():
         logger.info(f"Executing {mode} etc2snr workflow")
 
         snrs, texps, _ = calculate_snr_from_reference_lambda(
-            parameters, reference, coupled=args.coupled
+            parsed_parameters, reference, coupled=args.coupled
         )
 
         print(f"{mode} exposure time(s): ", texps)
         print(f"{mode} SNRs: ", snrs)
-    else:
-        parser.print_help()
 
 
 def calculate_texp(parameters: dict, ETC_validation: bool = False) -> tuple[dict, dict]:
@@ -346,6 +344,76 @@ def _get_closest_finite_time(wvl_array, exptime_array, ref_wav):
 
 
 def calculate_snr_from_reference_lambda(parameters, reference, coupled=False):
+    """
+    Calculate SNR by first deriving exposure time(s) at reference wavelength(s).
+
+    Runs the Exposure Time Calculator across all filters, extracts the
+    exposure time at one or more reference wavelengths, and then computes the
+    achievable signal-to-noise ratio for the resulting exposure time(s).
+
+    Two modes are supported:
+
+    - **Coupled** (``coupled=True``): A single reference wavelength determines
+    one scalar exposure time, which is then applied to *all* filters
+    simultaneously (e.g. a dichroic or parallel channel split, where every
+    channel shares the same integration). If several wavelengths are
+    provided, only the first is used and the remainder are ignored with a
+    warning.
+
+    - **Independent** (``coupled=False``, the default): Each reference
+    wavelength drives exactly one filter, evaluated on its own terms
+    (sequential, per-channel targeting). Each wavelength must fall within a
+    distinct filter's band; a filter claimed by more than one wavelength is
+    rejected. Supplying fewer wavelengths than there are filters is
+    permitted — the unmatched filters are simply not evaluated — but
+    supplying more wavelengths than filters is an error.
+
+    Parameters
+    ----------
+    parameters : dict
+        Dictionary containing all input parameters for the calculation. Must
+        include a ``"filter_list"`` entry of filter objects exposing a
+        ``contains(wavelength)`` method and a ``name`` attribute.
+    reference : float, astropy.units.Quantity, or list of these
+        The reference wavelength(s). A scalar is wrapped into a single-element
+        list. Bare numbers are interpreted in the default ``WAVELENGTH`` unit;
+        Quantities are converted to ``WAVELENGTH``.
+    coupled : bool, optional
+        If True, use a single reference wavelength to drive the exposure time
+        for all filters (coupled/parallel mode). If False (default), each
+        wavelength drives its own filter independently. Default is False.
+
+    Returns
+    -------
+    snr_results : dict
+        Dictionary keyed by filter name, each value containing ``"wavelength"``
+        and ``"snr"`` arrays (see :func:`calculate_snr`).
+    tims : dict
+        The exposure time(s) used to drive the SNR calculation. It is a
+        dict mapping filter name to that filter's exposure time.
+    validation : dict
+        Dictionary keyed by filter name, containing validation variables.
+
+    Raises
+    ------
+    ValueError
+        If a reference wavelength falls outside every filter's range; if, in
+        coupled mode, the wavelength matches no filter; in independent mode,
+        if more wavelengths are supplied than there are filters, or if two
+        wavelengths map to the same filter.
+
+    Warns
+    -----
+    In coupled mode, if more than one wavelength is supplied (extras ignored).
+    In independent mode, if fewer wavelengths are supplied than there are
+    filters (unmatched filters are not evaluated).
+
+    See Also
+    --------
+    calculate_texp : The underlying Exposure Time Calculator.
+    calculate_snr : Computes SNR given exposure time(s).
+    """
+
     if not isinstance(reference, (list, tuple)):
         reference = [reference]
 
@@ -381,19 +449,18 @@ def calculate_snr_from_reference_lambda(parameters, reference, coupled=False):
         logger.info(f"Coupled time driven by lambda={actual}: {texp_scalar}")
 
         snr_results, validation = calculate_snr(parameters, texp_scalar)
-
-        return snr_results, texp_scalar, validation
+        t_dict = {f.name: texp_scalar for f in filters}
+        return snr_results, t_dict, validation
 
     # --- Independent mode ---
-    # Guard against the classic "meant to use coupled" mistake:
-    # fewer wavelengths than filters means some filters have no time.
-    if len(reference) < len(filters):
-        logger.error(
+    # One reference wavelength per filter: counts must match, and each
+    # wavelength must land in a distinct filter.
+    if len(reference) != len(filters):
+        raise ValueError(
             f"Independent mode: you provided {len(reference)} wavelength(s) "
-            f"but the configuration has {len(filters)} filter(s). Each filter "
-            f"needs its own target wavelength in this mode. "
-            f"If you intended a single wavelength to drive the exposure time "
-            f"for ALL filters, pass coupled=True instead."
+            f"but there are {len(filters)} filter(s). Each filter needs "
+            f"exactly one target wavelength. For a single wavelength driving "
+            f"all filters, pass coupled=True instead."
         )
 
     times = {}
@@ -401,6 +468,13 @@ def calculate_snr_from_reference_lambda(parameters, reference, coupled=False):
         filt = next((f for f in filters if f.contains(l)), None)
         if filt is None:
             raise ValueError(f"Wavelength {l} is outside every filter's range.")
+
+        if filt.name in times:
+            raise ValueError(
+                f"Wavelength {l} maps to filter '{filt.name}', which is "
+                f"already targeted by another wavelength. In independent mode "
+                f"each filter may be driven by at most one wavelength."
+            )
 
         t_val, actual = _get_closest_finite_time(
             texp_results[filt.name]["wavelength"],

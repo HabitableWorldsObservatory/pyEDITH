@@ -26,9 +26,7 @@ def sample_input_file():
         magV = 5.0
         nzodis = 3.0
         observing_mode = IMAGER
-        secondary_observing_mode = IMAGER
         secondary_wavelength = 1.0
-        secondary_bandwidth = 0.2
         """)
         tmp.flush()
         yield tmp.name
@@ -221,45 +219,112 @@ def filter_input_file_single_filter():
     os.unlink(tmp.name)
 
 
+@pytest.fixture
+def legacy_secondary_file():
+    """Fixture providing a valid legacy primary+secondary IMAGER input file."""
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".edith") as tmp:
+        tmp.write("""
+        observing_mode = IMAGER
+        wavelength = 0.5
+        bandwidth = 0.2
+        Fp/Fs = 6.3e-8
+        Fstar_10pc = 112.8
+        secondary_wavelength = 1.0
+        secondary_Fp/Fs = 6.4e-8
+        secondary_Fstar_10pc = 110.2
+        """)
+        tmp.flush()
+        yield tmp.name
+    os.unlink(tmp.name)
+
+
 # ============================================================================
 # Tests for parse_input_file - Basic functionality
 # ============================================================================
 
 
 def test_parse_input_file_basic(sample_input_file):
-    """Test parsing a basic input file with valid parameters."""
-    variables, secondary_variables = parse_input_file(
-        sample_input_file, secondary_flag=True
-    )
+    """A legacy secondary_ file is translated into the canonical form:
+    a two-filter filter_list plus a piecewise-constant wavelength grid,
+    with the secondary block fully dissolved."""
+    variables = parse_input_file(sample_input_file)
 
-    assert variables["wavelength"] == 0.5
+    # --- Scalars untouched by the shim pass straight through ---
     assert variables["distance"] == 10
     assert variables["magV"] == 5.0
     assert variables["nzodis"] == 3.0
     assert variables["observing_mode"] == "IMAGER"
-    assert secondary_variables["wavelength"] == 1.0
 
+    # --- The legacy block is dissolved into a filter_list ---
+    assert "filter_list" in variables
+    assert len(variables["filter_list"]) == 2
+    f0, f1 = variables["filter_list"]
+    assert f0.name == "primary"
+    assert f1.name == "secondary"
+    assert np.isclose(f0.center.to(u.um).value, 0.5)
+    assert np.isclose(f1.center.to(u.um).value, 1.0)
 
-def test_parse_input_file_secondary_prefix_removed(sample_input_file):
-    """Test that 'secondary_' prefix is removed from secondary variable keys."""
-    variables, secondary_variables = parse_input_file(
-        sample_input_file, secondary_flag=True
-    )
-
-    # Should have 'wavelength', not 'secondary_wavelength'
-    assert "wavelength" in secondary_variables
-    assert "secondary_wavelength" not in secondary_variables
+    # --- 'wavelength' is now the 4-point top-hat sampling grid ---
+    wl = variables["wavelength"]
+    assert len(wl) == 4
+    assert wl == sorted(wl)  # strictly increasing
+    # bands bracket 0.5 and 1.0 respectively (bandwidth 0.2)
+    assert wl[0] < 0.5 < wl[1]
+    assert wl[2] < 1.0 < wl[3]
 
 
 def test_parse_input_file_ifs_valid(ifs_input_file_valid):
     """Test parsing a valid IFS mode input file."""
-    variables, secondary_variables = parse_input_file(
-        ifs_input_file_valid, secondary_flag=False
-    )
+    variables = parse_input_file(ifs_input_file_valid)
 
     assert np.all(variables["wavelength"] == [0.5, 0.6, 0.7])
     assert np.all(variables["Fstar_10pc"] == [1e-8, 1e-8, 1e-8])
     assert np.all(variables["Fp/Fs"] == [1e-10, 1e-10, 1e-10])
+
+
+# Legacy Shim
+
+
+def test_parse_input_file_legacy_secondary_builds_two_filters(legacy_secondary_file):
+    """Test that a legacy secondary_ file is translated into a two-filter list."""
+    variables = parse_input_file(legacy_secondary_file)
+
+    assert "filter_list" in variables
+    assert len(variables["filter_list"]) == 2
+    f0, f1 = variables["filter_list"]
+    assert f0.name == "primary"
+    assert f1.name == "secondary"
+    assert np.isclose(f0.center.to(u.um).value, 0.5)
+    assert np.isclose(f1.center.to(u.um).value, 1.0)
+
+
+def test_parse_input_file_legacy_secondary_paints_top_hat(legacy_secondary_file):
+    """Test that overridden wavelength-dependent parameters are painted flat
+    per band as [prim, prim, sec, sec]."""
+    variables = parse_input_file(legacy_secondary_file)
+
+    assert variables["Fp/Fs"] == [6.3e-8, 6.3e-8, 6.4e-8, 6.4e-8]
+    assert variables["Fstar_10pc"] == [112.8, 112.8, 110.2, 110.2]
+
+
+def test_parse_input_file_legacy_secondary_wavelength_grid(legacy_secondary_file):
+    """Test that 'wavelength' becomes a 4-point, strictly increasing top-hat grid."""
+    variables = parse_input_file(legacy_secondary_file)
+
+    wl = variables["wavelength"]
+    assert len(wl) == 4
+    assert wl == sorted(wl)
+    assert wl[0] < 0.5 < wl[1]
+    assert wl[2] < 1.0 < wl[3]
+
+
+def test_parse_input_file_legacy_secondary_skips_absent_param(legacy_secondary_file):
+    """Test that a whitelisted parameter absent from the file is not painted
+    (the 'prim_value is None -> continue' branch)."""
+    variables = parse_input_file(legacy_secondary_file)
+
+    # 'QE' is whitelisted but absent from the fixture -> must not be created.
+    assert "QE" not in variables
 
 
 # ============================================================================
@@ -273,7 +338,7 @@ def test_parse_input_file_no_observing_mode(ifs_input_file_no_observing_mode):
         KeyError,
         match="Required parameter 'observing_mode' is not provided in the input file.",
     ):
-        parse_input_file(ifs_input_file_no_observing_mode, secondary_flag=False)
+        _ = parse_input_file(ifs_input_file_no_observing_mode)
 
 
 def test_parse_input_file_wrong_observing_mode(ifs_input_file_wrong_observing_mode):
@@ -282,30 +347,7 @@ def test_parse_input_file_wrong_observing_mode(ifs_input_file_wrong_observing_mo
         ValueError,
         match="Invalid observing mode 'Invalid'. Must be 'IMAGER' or 'IFS'.",
     ):
-        parse_input_file(ifs_input_file_wrong_observing_mode, secondary_flag=False)
-
-
-def test_parse_input_file_imager_multi_wavelength_error(
-    sample_input_file_imager_multi_wavelength,
-):
-    """Test that IMAGER mode with multiple wavelengths raises KeyError."""
-    with pytest.raises(
-        KeyError, match="In IMAGER mode you can only use one wavelength at a time"
-    ):
-        parse_input_file(
-            sample_input_file_imager_multi_wavelength, secondary_flag=False
-        )
-
-
-def test_parse_input_file_secondary_flag_no_secondary_vars(
-    sample_input_file_imager_multi_wavelength,
-):
-    """Test that secondary_flag=True without secondary variables raises KeyError."""
-    with pytest.raises(
-        KeyError,
-        match="Secondary flag is True but no secondary variables found in the input file",
-    ):
-        parse_input_file(sample_input_file_imager_multi_wavelength, secondary_flag=True)
+        _ = parse_input_file(ifs_input_file_wrong_observing_mode)
 
 
 def test_parse_input_file_ifs_missing_keys(ifs_input_file_missing_keys):
@@ -314,7 +356,7 @@ def test_parse_input_file_ifs_missing_keys(ifs_input_file_missing_keys):
         KeyError,
         match="Required parameters 'wavelength', 'Fstar_10pc', and 'Fp/Fs' are not provided",
     ):
-        parse_input_file(ifs_input_file_missing_keys, secondary_flag=False)
+        _ = parse_input_file(ifs_input_file_missing_keys)
 
 
 def test_parse_input_file_ifs_mismatched_lengths(ifs_input_file_mismatched_lengths):
@@ -323,7 +365,7 @@ def test_parse_input_file_ifs_mismatched_lengths(ifs_input_file_mismatched_lengt
         ValueError,
         match="All of wavelength, Fstar_10pc, Fp/Fs must have the same length",
     ):
-        parse_input_file(ifs_input_file_mismatched_lengths, secondary_flag=False)
+        _ = parse_input_file(ifs_input_file_mismatched_lengths)
 
 
 def test_parse_input_file_invalid_spectrum_file():
@@ -338,7 +380,7 @@ def test_parse_input_file_invalid_spectrum_file():
         with pytest.raises(
             FileNotFoundError, match="Spectrum file not found: nonexistent_file.csv"
         ):
-            parse_input_file(tmp.name, secondary_flag=False)
+            _ = parse_input_file(tmp.name)
 
         os.unlink(tmp.name)
 
@@ -355,7 +397,7 @@ def test_parse_input_file_spectrum_file_invalid_columns(spectrum_file_invalid_co
         with pytest.raises(
             ValueError, match="Spectrum file must contain exactly 3 columns"
         ):
-            parse_input_file(tmp.name, secondary_flag=False)
+            _ = parse_input_file(tmp.name)
 
         os.unlink(tmp.name)
 
@@ -372,7 +414,145 @@ def test_parse_input_file_spectrum_file_non_numeric(spectrum_file_non_numeric):
         with pytest.raises(
             ValueError, match="Column 'Fp/Fs' contains non-numeric values"
         ):
-            parse_input_file(tmp.name, secondary_flag=False)
+            _ = parse_input_file(tmp.name)
+
+        os.unlink(tmp.name)
+
+
+# Legacy Shim
+
+
+def test_parse_input_file_legacy_secondary_rejects_ifs_mode():
+    """Test that a legacy secondary_ file in IFS mode raises KeyError."""
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".edith") as tmp:
+        tmp.write("""
+        observing_mode = IFS
+        wavelength = 0.5
+        bandwidth = 0.2
+        secondary_wavelength = 1.0
+        """)
+        tmp.flush()
+
+        with pytest.raises(
+            KeyError, match='Legacy secondary mode only works in "IMAGER" mode'
+        ):
+            _ = parse_input_file(tmp.name)
+
+        os.unlink(tmp.name)
+
+
+def test_parse_input_file_legacy_secondary_mixed_with_filter_keys():
+    """Test that mixing secondary_ and filter_ parameters raises ValueError."""
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".edith") as tmp:
+        tmp.write("""
+        observing_mode = IMAGER
+        wavelength = 0.5
+        bandwidth = 0.2
+        filter_name = ['F1']
+        filter_center = [0.6]
+        filter_bandwidth = [0.1]
+        secondary_wavelength = 1.0
+        """)
+        tmp.flush()
+
+        with pytest.raises(
+            ValueError,
+            match="An input file may use either the legacy secondary_\\* parameters",
+        ):
+            _ = parse_input_file(tmp.name)
+
+        os.unlink(tmp.name)
+
+
+def test_parse_input_file_legacy_secondary_missing_primary_wavelength():
+    """Test that a legacy secondary_ file with no primary wavelength raises KeyError."""
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".edith") as tmp:
+        tmp.write("""
+        observing_mode = IMAGER
+        bandwidth = 0.2
+        secondary_wavelength = 1.0
+        """)
+        tmp.flush()
+
+        with pytest.raises(KeyError, match="requires a primary 'wavelength'"):
+            _ = parse_input_file(tmp.name)
+
+        os.unlink(tmp.name)
+
+
+def test_parse_input_file_legacy_secondary_missing_secondary_wavelength():
+    """Test that legacy secondary_ keys without secondary_wavelength raise KeyError."""
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".edith") as tmp:
+        tmp.write("""
+        observing_mode = IMAGER
+        wavelength = 0.5
+        bandwidth = 0.2
+        secondary_Fp/Fs = 6.4e-8
+        """)
+        tmp.flush()
+
+        with pytest.raises(KeyError, match="requires 'secondary_wavelength'"):
+            _ = parse_input_file(tmp.name)
+
+        os.unlink(tmp.name)
+
+
+def test_parse_input_file_legacy_secondary_missing_bandwidth():
+    """Test that a legacy secondary_ file with no bandwidth raises KeyError."""
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".edith") as tmp:
+        tmp.write("""
+        observing_mode = IMAGER
+        wavelength = 0.5
+        secondary_wavelength = 1.0
+        """)
+        tmp.flush()
+
+        with pytest.raises(KeyError, match="requires 'bandwidth'"):
+            _ = parse_input_file(tmp.name)
+
+        os.unlink(tmp.name)
+
+
+def test_parse_input_file_legacy_secondary_overlapping_bands():
+    """Test that two wavelengths whose bandpasses overlap raise ValueError."""
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".edith") as tmp:
+        tmp.write("""
+        observing_mode = IMAGER
+        wavelength = 0.5
+        bandwidth = 0.2
+        secondary_wavelength = 0.52
+        """)
+        tmp.flush()
+
+        with pytest.raises(ValueError, match="overlap or are out of order"):
+            _ = parse_input_file(tmp.name)
+
+        os.unlink(tmp.name)
+
+
+def test_parse_input_file_legacy_secondary_warns_non_wavelength_dependent(caplog):
+    """Test that an off-whitelist secondary_ override is warned about and dropped."""
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".edith") as tmp:
+        tmp.write("""
+        observing_mode = IMAGER
+        wavelength = 0.5
+        bandwidth = 0.2
+        secondary_wavelength = 1.0
+        secondary_distance = 999
+        """)
+        tmp.flush()
+
+        with caplog.at_level(logging.WARNING, logger="pyEDITH"):
+            variables = parse_input_file(tmp.name)
+
+        assert any(
+            "secondary_distance" in record.message
+            and "not a wavelength-dependent parameter" in record.message
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        )
+        # The dropped key did not become a per-band array.
+        assert not isinstance(variables.get("distance"), list)
 
         os.unlink(tmp.name)
 
@@ -391,7 +571,7 @@ def test_parse_input_file_with_valid_spectrum_file(valid_spectrum_file):
         """)
         tmp.flush()
 
-        variables, _ = parse_input_file(tmp.name, secondary_flag=False)
+        variables = parse_input_file(tmp.name)
 
         assert variables["observing_mode"] == "IFS"
         assert "wavelength" in variables
@@ -419,7 +599,7 @@ def test_parse_array_value_unquoted_string(tmp_path):
         "wavelength = 0.5\n"
         "modes = [photometry, spectroscopy]\n"  # unquoted, non-numeric items
     )
-    variables, _ = parse_input_file(str(file_path), secondary_flag=False)
+    variables = parse_input_file(str(file_path))
     assert variables["modes"] == ["photometry", "spectroscopy"]
 
 
@@ -432,7 +612,7 @@ def test_parse_line_without_equals_is_skipped(tmp_path):
         "this line has no equals sign\n"  # no '=' -> skipped
         "wavelength = 0.5\n"
     )
-    variables, _ = parse_input_file(str(file_path), secondary_flag=False)
+    variables = parse_input_file(str(file_path))
     assert variables["observing_mode"] == "IMAGER"
     assert variables["wavelength"] == 0.5
     assert "this line has no equals sign" not in variables
@@ -953,6 +1133,19 @@ def test_parse_parameters_observatory_specs():
     assert isinstance(parsed["observing_mode"], str)
 
 
+def test_parse_parameters_invalid_observing_mode():
+    """Test that an invalid observing_mode in parse_parameters raises KeyError."""
+    parameters = {
+        "wavelength": [0.5],
+        "observing_mode": "Invalid",
+    }
+
+    with pytest.raises(
+        KeyError, match="Invalid observing mode. Must be 'IMAGER' or 'IFS'."
+    ):
+        _ = parse_parameters(parameters)
+
+
 # ============================================================================
 # Tests for parse_parameters - Boolean parameters
 # ============================================================================
@@ -1303,34 +1496,6 @@ def test_parse_parameters_imager_mode():
 
 
 # ============================================================================
-# Tests for read_configuration
-# ============================================================================
-
-
-def test_read_configuration_with_secondary(sample_input_file):
-    """Test reading configuration with secondary parameters."""
-    parsed_parameters, parsed_secondary_parameters = read_configuration(
-        sample_input_file, secondary_flag=True
-    )
-
-    assert np.all(parsed_parameters["wavelength"] == np.array([0.5]))
-    assert parsed_parameters["distance"] == 10
-    assert parsed_parameters["magV"] == 5.0
-    assert parsed_parameters["nzodis"] == 3.0
-    assert parsed_parameters["observing_mode"] == "IMAGER"
-    assert parsed_secondary_parameters["wavelength"] == np.array([1.0])
-
-
-def test_read_configuration_without_secondary(sample_input_file):
-    """Test reading configuration without secondary parameters."""
-    parsed_parameters, parsed_secondary_parameters = read_configuration(
-        sample_input_file, secondary_flag=False
-    )
-
-    assert parsed_secondary_parameters == {}
-
-
-# ============================================================================
 # Tests for get_observatory_config
 # ============================================================================
 
@@ -1629,9 +1794,7 @@ def test_parse_parameters_no_nchannels(caplog):
 
 def test_parse_input_file_filter_center_bandwidth(filter_input_file_center_bandwidth):
     """Test parsing filters with center/bandwidth specification."""
-    variables, _ = parse_input_file(
-        filter_input_file_center_bandwidth, secondary_flag=False
-    )
+    variables = parse_input_file(filter_input_file_center_bandwidth)
 
     assert "filter_list" in variables
     assert len(variables["filter_list"]) == 1
@@ -1644,7 +1807,7 @@ def test_parse_input_file_filter_center_bandwidth(filter_input_file_center_bandw
 
 def test_parse_input_file_filter_low_high(filter_input_file_low_high):
     """Test parsing filters with low/high specification."""
-    variables, _ = parse_input_file(filter_input_file_low_high, secondary_flag=False)
+    variables = parse_input_file(filter_input_file_low_high)
 
     assert "filter_list" in variables
     assert len(variables["filter_list"]) == 1
@@ -1660,9 +1823,7 @@ def test_parse_input_file_filter_ifs_with_resolution(
     filter_input_file_ifs_with_resolution,
 ):
     """Test parsing IFS mode filters with resolution."""
-    variables, _ = parse_input_file(
-        filter_input_file_ifs_with_resolution, secondary_flag=False
-    )
+    variables = parse_input_file(filter_input_file_ifs_with_resolution)
 
     assert "filter_list" in variables
     assert len(variables["filter_list"]) == 2
@@ -1678,9 +1839,7 @@ def test_parse_input_file_filter_ifs_with_resolution(
 
 def test_parse_input_file_filter_single_filter(filter_input_file_single_filter):
     """Test parsing a single filter (scalar values converted to list)."""
-    variables, _ = parse_input_file(
-        filter_input_file_single_filter, secondary_flag=False
-    )
+    variables = parse_input_file(filter_input_file_single_filter)
 
     assert "filter_list" in variables
     assert len(variables["filter_list"]) == 1
@@ -1703,7 +1862,7 @@ def test_parse_input_file_filter_missing_name():
             KeyError,
             match="'filter_name' is required whenever any filter_\\* parameter is provided",
         ):
-            parse_input_file(tmp.name, secondary_flag=False)
+            _ = parse_input_file(tmp.name)
 
         os.unlink(tmp.name)
 
@@ -1726,7 +1885,7 @@ def test_parse_input_file_filter_both_specs_provided():
             ValueError,
             match="Specify filters using either \\(filter_center, filter_bandwidth\\) or \\(filter_low, filter_high\\), not both",
         ):
-            parse_input_file(tmp.name, secondary_flag=False)
+            _ = parse_input_file(tmp.name)
 
         os.unlink(tmp.name)
 
@@ -1745,7 +1904,7 @@ def test_parse_input_file_filter_no_bounds_specified():
             KeyError,
             match="Filters require either \\(filter_center, filter_bandwidth\\) or \\(filter_low, filter_high\\)",
         ):
-            parse_input_file(tmp.name, secondary_flag=False)
+            _ = parse_input_file(tmp.name)
 
         os.unlink(tmp.name)
 
@@ -1764,7 +1923,7 @@ def test_parse_input_file_filter_missing_center():
         with pytest.raises(
             KeyError, match="'filter_center' is required to fully specify filter bounds"
         ):
-            parse_input_file(tmp.name, secondary_flag=False)
+            _ = parse_input_file(tmp.name)
 
         os.unlink(tmp.name)
 
@@ -1784,7 +1943,7 @@ def test_parse_input_file_filter_missing_bandwidth():
             KeyError,
             match="'filter_bandwidth' is required to fully specify filter bounds",
         ):
-            parse_input_file(tmp.name, secondary_flag=False)
+            _ = parse_input_file(tmp.name)
 
         os.unlink(tmp.name)
 
@@ -1803,7 +1962,7 @@ def test_parse_input_file_filter_missing_low():
         with pytest.raises(
             KeyError, match="'filter_low' is required to fully specify filter bounds"
         ):
-            parse_input_file(tmp.name, secondary_flag=False)
+            _ = parse_input_file(tmp.name)
 
         os.unlink(tmp.name)
 
@@ -1822,7 +1981,7 @@ def test_parse_input_file_filter_missing_high():
         with pytest.raises(
             KeyError, match="'filter_high' is required to fully specify filter bounds"
         ):
-            parse_input_file(tmp.name, secondary_flag=False)
+            _ = parse_input_file(tmp.name)
 
         os.unlink(tmp.name)
 
@@ -1844,7 +2003,7 @@ def test_parse_input_file_filter_ifs_missing_resolution(valid_spectrum_file):
             KeyError,
             match="'filter_resolution' is required for filters when observing_mode is 'IFS'",
         ):
-            parse_input_file(tmp.name, secondary_flag=False)
+            _ = parse_input_file(tmp.name)
 
         os.unlink(tmp.name)
 
@@ -1864,7 +2023,7 @@ def test_parse_input_file_filter_mismatched_lengths():
         with pytest.raises(
             ValueError, match="All filter_\\* parameters .* must have the same length"
         ):
-            parse_input_file(tmp.name, secondary_flag=False)
+            _ = parse_input_file(tmp.name)
 
         os.unlink(tmp.name)
 
@@ -1887,7 +2046,7 @@ def test_parse_input_file_filter_mismatched_lengths_with_resolution(
         with pytest.raises(
             ValueError, match="All filter_\\* parameters .* must have the same length"
         ):
-            parse_input_file(tmp.name, secondary_flag=False)
+            _ = parse_input_file(tmp.name)
 
         os.unlink(tmp.name)
 
@@ -1905,7 +2064,7 @@ def test_parse_input_file_filter_imager_no_resolution():
         """)
         tmp.flush()
 
-        variables, _ = parse_input_file(tmp.name, secondary_flag=False)
+        variables = parse_input_file(tmp.name)
 
         # Should work without resolution for IMAGER
         assert "filter_list" in variables
@@ -1918,7 +2077,7 @@ def test_parse_input_file_filter_keys_removed_after_processing(
     filter_input_file_low_high,
 ):
     """Test that filter_* keys are removed after creating filter_list."""
-    variables, _ = parse_input_file(filter_input_file_low_high, secondary_flag=False)
+    variables = parse_input_file(filter_input_file_low_high)
 
     # Original filter_* keys should be removed
     assert "filter_name" not in variables
@@ -1944,7 +2103,7 @@ def test_parse_input_file_filter_type_set_from_observing_mode(valid_spectrum_fil
         """)
         tmp.flush()
 
-        variables, _ = parse_input_file(tmp.name, secondary_flag=False)
+        variables = parse_input_file(tmp.name)
         assert variables["filter_list"][0].type == "IMAGER"
 
         os.unlink(tmp.name)
@@ -1962,7 +2121,7 @@ def test_parse_input_file_filter_type_set_from_observing_mode(valid_spectrum_fil
         """)
         tmp.flush()
 
-        variables, _ = parse_input_file(tmp.name, secondary_flag=False)
+        variables = parse_input_file(tmp.name)
         assert variables["filter_list"][0].type == "IFS"
 
         os.unlink(tmp.name)

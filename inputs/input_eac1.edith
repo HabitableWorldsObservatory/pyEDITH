@@ -13,6 +13,7 @@
 
 ;--- OBSERVATIONAL PARAMETERS ---
 wavelength = 0.5                    ; wavelength (micron)
+bandwidth=0.1
 snr = 7.0                           ; signal-to-noise ratio at desired wavelength {same length as wavelength} 
 CRb_multiplier  = 2.                ; factor to multiply to remove background
 psf_trunc_ratio = 0.35              ; truncation ratio of the PSF 

@@ -108,30 +108,23 @@ def test_main_no_args_shows_help():
 # ============================================================================
 
 
-@pytest.mark.parametrize(
-    "subcommand, error_message",
-    [
-        ("etc", "--edith argument is required for etc subfunction."),
-        (
-            "snr",
-            "Both --edith and --time arguments are required for snr subfunction.",
-        ),
-        ("etc2snr", "--edith argument is required for etc2snr subfunction."),
-    ],
-)
-def test_main_missing_edith_argument(subcommand, error_message):
-    """Test that missing --edith argument raises appropriate error for each subcommand."""
+@pytest.mark.parametrize("subcommand", ["etc", "snr", "etc2snr"])
+def test_main_missing_edith_argument(subcommand):
+    """Missing --edith raises the unified SyntaxError for every subcommand."""
     with patch("sys.argv", ["edith", subcommand]):
-        with pytest.raises(SyntaxError, match=error_message):
+        with pytest.raises(SyntaxError, match="--edith argument is required."):
             main()
 
 
-def test_main_snr_missing_time_argument():
-    """Test that snr subcommand requires both --edith and --time arguments."""
+@patch("pyEDITH.cli.parse_input.parse_input_file")
+@patch("pyEDITH.cli.parse_input.parse_parameters")
+def test_main_snr_missing_time_argument(mock_parse_params, mock_parse_file):
+    """snr with --edith but no --time raises the new SyntaxError."""
+    mock_parse_file.return_value = {}
+    mock_parse_params.return_value = {}
     with patch("sys.argv", ["edith", "snr", "--edith", "test.edith"]):
         with pytest.raises(
-            SyntaxError,
-            match="Both --edith and --time arguments are required for snr subfunction.",
+            SyntaxError, match="--time argument is required for snr subfunction."
         ):
             main()
 
@@ -141,14 +134,14 @@ def test_main_snr_missing_time_argument():
 # ============================================================================
 
 
-@patch("pyEDITH.cli.parse_input.read_configuration")
+@patch("pyEDITH.cli.parse_input.parse_input_file")
+@patch("pyEDITH.cli.parse_input.parse_parameters")
 @patch("pyEDITH.cli.calculate_texp")
-def test_main_etc_basic_execution(
-    mock_calculate_texp, mock_read_configuration, mock_args
-):
-    """Test that etc subcommand correctly calculates and prints exposure time."""
-    mock_read_configuration.return_value = ({}, {})
-    mock_calculate_texp.return_value = (np.array([1.0]), {})
+def test_main_etc_basic_execution(mock_texp, mock_parse_params, mock_parse_file):
+    """etc subcommand calculates and prints exposure time."""
+    mock_parse_file.return_value = {}
+    mock_parse_params.return_value = {}
+    mock_texp.return_value = (np.array([1.0]), {})
 
     with patch("sys.argv", ["edith", "etc", "--edith", "test.edith"]):
         with patch("builtins.print") as mock_print:
@@ -161,14 +154,14 @@ def test_main_etc_basic_execution(
 # ============================================================================
 
 
-@patch("pyEDITH.cli.parse_input.read_configuration")
+@patch("pyEDITH.cli.parse_input.parse_input_file")
+@patch("pyEDITH.cli.parse_input.parse_parameters")
 @patch("pyEDITH.cli.calculate_snr")
-def test_main_snr_basic_execution(
-    mock_calculate_snr, mock_read_configuration, mock_args
-):
-    """Test that snr subcommand correctly calculates and prints SNR."""
-    mock_read_configuration.return_value = ({}, {})
-    mock_calculate_snr.return_value = (np.array([10.0]), {})
+def test_main_snr_basic_execution(mock_snr, mock_parse_params, mock_parse_file):
+    """snr subcommand calculates and prints SNR."""
+    mock_parse_file.return_value = {}
+    mock_parse_params.return_value = {}
+    mock_snr.return_value = (np.array([10.0]), {})
 
     with patch("sys.argv", ["edith", "snr", "--edith", "test.edith", "--time", "60"]):
         with patch("builtins.print") as mock_print:
@@ -181,21 +174,45 @@ def test_main_snr_basic_execution(
 # ============================================================================
 
 
-@patch("pyEDITH.cli.parse_input.read_configuration")
-def test_main_etc2snr_no_ref_lambda_raises(mock_read_configuration):
-    """etc2snr without --ref_lambda raises a descriptive ValueError (lines 140-145)."""
-    mock_read_configuration.return_value = ({"some": "params"}, {})
+@patch("pyEDITH.cli.parse_input.parse_input_file")
+@patch("pyEDITH.cli.parse_input.parse_parameters")
+@patch("pyEDITH.cli.calculate_snr_from_reference_lambda")
+def test_main_etc2snr_basic_execution(mock_ref_snr, mock_parse_params, mock_parse_file):
+    """etc2snr with --ref_lambda runs through to the end of main()."""
+    mock_parse_file.return_value = {}
+    mock_parse_params.return_value = {"some": "params"}
+    snrs = {"VIS": {"snr": np.array([7.0])}}
+    texps = {"VIS": 30.0}
+    mock_ref_snr.return_value = (snrs, texps, {})
+
+    with patch(
+        "sys.argv",
+        ["edith", "etc2snr", "--edith", "test.edith", "--ref_lambda", "1.5"],
+    ):
+        with patch("builtins.print"):  # swallow output
+            main()
+    mock_ref_snr.assert_called_once()
+
+
+@patch("pyEDITH.cli.parse_input.parse_input_file")
+@patch("pyEDITH.cli.parse_input.parse_parameters")
+def test_main_etc2snr_no_ref_lambda_raises(mock_parse_params, mock_parse_file):
+    """etc2snr without --ref_lambda raises a descriptive ValueError."""
+    mock_parse_file.return_value = {}
+    mock_parse_params.return_value = {"some": "params"}
 
     with patch("sys.argv", ["edith", "etc2snr", "--edith", "test.edith"]):
         with pytest.raises(ValueError, match="etc2snr requires --ref_lambda"):
             main()
 
 
-@patch("pyEDITH.cli.parse_input.read_configuration")
+@patch("pyEDITH.cli.parse_input.parse_input_file")
+@patch("pyEDITH.cli.parse_input.parse_parameters")
 @patch("pyEDITH.cli.calculate_snr_from_reference_lambda")
-def test_main_etc2snr_coupled_routing(mock_ref_snr, mock_read_configuration):
+def test_main_etc2snr_coupled_routing(mock_ref_snr, mock_parse_params, mock_parse_file):
     """--coupled routes with coupled=True and a single parsed float."""
-    mock_read_configuration.return_value = ({"some": "params"}, {})
+    mock_parse_file.return_value = {}
+    mock_parse_params.return_value = {"some": "params"}
     mock_ref_snr.return_value = ({"VIS": {"snr": np.array([7.0])}}, 30.0, {})
 
     with patch(
@@ -214,16 +231,19 @@ def test_main_etc2snr_coupled_routing(mock_ref_snr, mock_read_configuration):
             main()
 
     mock_ref_snr.assert_called_once()
-    # Positional: (parameters, reference) ; keyword: coupled=True
-    assert mock_ref_snr.call_args[0][1] == [1.5]  # parsed to float, in a list
+    assert mock_ref_snr.call_args[0][1] == [1.5]
     assert mock_ref_snr.call_args[1]["coupled"] is True
 
 
-@patch("pyEDITH.cli.parse_input.read_configuration")
+@patch("pyEDITH.cli.parse_input.parse_input_file")
+@patch("pyEDITH.cli.parse_input.parse_parameters")
 @patch("pyEDITH.cli.calculate_snr_from_reference_lambda")
-def test_main_etc2snr_independent_routing(mock_ref_snr, mock_read_configuration):
+def test_main_etc2snr_independent_routing(
+    mock_ref_snr, mock_parse_params, mock_parse_file
+):
     """No --coupled routes with coupled=False and multiple parsed floats."""
-    mock_read_configuration.return_value = ({"some": "params"}, {})
+    mock_parse_file.return_value = {}
+    mock_parse_params.return_value = {"some": "params"}
     mock_ref_snr.return_value = ({"VIS": {}, "NIR": {}}, {"VIS": 10.0, "NIR": 15.0}, {})
 
     with patch(
@@ -234,15 +254,19 @@ def test_main_etc2snr_independent_routing(mock_ref_snr, mock_read_configuration)
             main()
 
     mock_ref_snr.assert_called_once()
-    assert mock_ref_snr.call_args[0][1] == [0.5, 1.2]  # both parsed to float
+    assert mock_ref_snr.call_args[0][1] == [0.5, 1.2]
     assert mock_ref_snr.call_args[1]["coupled"] is False
 
 
-@patch("pyEDITH.cli.parse_input.read_configuration")
+@patch("pyEDITH.cli.parse_input.parse_input_file")
+@patch("pyEDITH.cli.parse_input.parse_parameters")
 @patch("pyEDITH.cli.calculate_snr_from_reference_lambda")
-def test_main_etc2snr_parses_strings_to_floats(mock_ref_snr, mock_read_configuration):
-    """Line 147: args.ref_lambda strings are converted to floats, not left as str."""
-    mock_read_configuration.return_value = ({"some": "params"}, {})
+def test_main_etc2snr_parses_strings_to_floats(
+    mock_ref_snr, mock_parse_params, mock_parse_file
+):
+    """args.ref_lambda strings are converted to genuine floats."""
+    mock_parse_file.return_value = {}
+    mock_parse_params.return_value = {"some": "params"}
     mock_ref_snr.return_value = ({}, {}, {})
 
     with patch(
@@ -254,7 +278,7 @@ def test_main_etc2snr_parses_strings_to_floats(mock_ref_snr, mock_read_configura
 
     passed = mock_ref_snr.call_args[0][1]
     assert passed == [0.75]
-    assert all(isinstance(x, float) for x in passed)  # genuinely floats, not "0.75"
+    assert all(isinstance(x, float) for x in passed)
 
 
 # ============================================================================
@@ -263,14 +287,16 @@ def test_main_etc2snr_parses_strings_to_floats(mock_ref_snr, mock_read_configura
 
 
 @patch("pyEDITH.cli.set_verbosity")
-@patch("pyEDITH.cli.parse_input.read_configuration")
+@patch("pyEDITH.cli.parse_input.parse_input_file")
+@patch("pyEDITH.cli.parse_input.parse_parameters")
 @patch("pyEDITH.cli.calculate_texp")
 def test_main_default_verbosity_level(
-    mock_calculate_texp, mock_read_configuration, mock_set_verbosity
+    mock_texp, mock_parse_params, mock_parse_file, mock_set_verbosity
 ):
     """Test that default verbosity (no flag) sets warning level."""
-    mock_read_configuration.return_value = ({}, {})
-    mock_calculate_texp.return_value = (np.array([1.0]), {})
+    mock_parse_file.return_value = {}
+    mock_parse_params.return_value = {}
+    mock_texp.return_value = (np.array([1.0]), {})
 
     with patch("sys.argv", ["pyedith", "etc", "--edith", "test.edith"]):
         with patch("builtins.print"):
@@ -279,14 +305,16 @@ def test_main_default_verbosity_level(
 
 
 @patch("pyEDITH.cli.set_verbosity")
-@patch("pyEDITH.cli.parse_input.read_configuration")
+@patch("pyEDITH.cli.parse_input.parse_input_file")
+@patch("pyEDITH.cli.parse_input.parse_parameters")
 @patch("pyEDITH.cli.calculate_texp")
 def test_main_verbose_flag_sets_info_level(
-    mock_calculate_texp, mock_read_configuration, mock_set_verbosity
+    mock_texp, mock_parse_params, mock_parse_file, mock_set_verbosity
 ):
     """Test that -v flag sets info verbosity level."""
-    mock_read_configuration.return_value = ({}, {})
-    mock_calculate_texp.return_value = (np.array([1.0]), {})
+    mock_parse_file.return_value = {}
+    mock_parse_params.return_value = {}
+    mock_texp.return_value = (np.array([1.0]), {})
 
     with patch("sys.argv", ["pyedith", "-v", "etc", "--edith", "test.edith"]):
         with patch("builtins.print"):
@@ -295,14 +323,16 @@ def test_main_verbose_flag_sets_info_level(
 
 
 @patch("pyEDITH.cli.set_verbosity")
-@patch("pyEDITH.cli.parse_input.read_configuration")
+@patch("pyEDITH.cli.parse_input.parse_input_file")
+@patch("pyEDITH.cli.parse_input.parse_parameters")
 @patch("pyEDITH.cli.calculate_texp")
 def test_main_verbose_long_flag_sets_info_level(
-    mock_calculate_texp, mock_read_configuration, mock_set_verbosity
+    mock_texp, mock_parse_params, mock_parse_file, mock_set_verbosity
 ):
     """Test that --verbose flag sets info verbosity level."""
-    mock_read_configuration.return_value = ({}, {})
-    mock_calculate_texp.return_value = (np.array([1.0]), {})
+    mock_parse_file.return_value = {}
+    mock_parse_params.return_value = {}
+    mock_texp.return_value = (np.array([1.0]), {})
 
     with patch("sys.argv", ["pyedith", "--verbose", "etc", "--edith", "test.edith"]):
         with patch("builtins.print"):
@@ -311,14 +341,16 @@ def test_main_verbose_long_flag_sets_info_level(
 
 
 @patch("pyEDITH.cli.set_verbosity")
-@patch("pyEDITH.cli.parse_input.read_configuration")
+@patch("pyEDITH.cli.parse_input.parse_input_file")
+@patch("pyEDITH.cli.parse_input.parse_parameters")
 @patch("pyEDITH.cli.calculate_texp")
 def test_main_double_verbose_flag_sets_debug_level(
-    mock_calculate_texp, mock_read_configuration, mock_set_verbosity
+    mock_texp, mock_parse_params, mock_parse_file, mock_set_verbosity
 ):
     """Test that -vv flag sets debug verbosity level."""
-    mock_read_configuration.return_value = ({}, {})
-    mock_calculate_texp.return_value = (np.array([1.0]), {})
+    mock_parse_file.return_value = {}
+    mock_parse_params.return_value = {}
+    mock_texp.return_value = (np.array([1.0]), {})
 
     with patch("sys.argv", ["pyedith", "-vv", "etc", "--edith", "test.edith"]):
         with patch("builtins.print"):
@@ -327,14 +359,16 @@ def test_main_double_verbose_flag_sets_debug_level(
 
 
 @patch("pyEDITH.cli.set_verbosity")
-@patch("pyEDITH.cli.parse_input.read_configuration")
+@patch("pyEDITH.cli.parse_input.parse_input_file")
+@patch("pyEDITH.cli.parse_input.parse_parameters")
 @patch("pyEDITH.cli.calculate_texp")
 def test_main_quiet_flag_sets_error_level(
-    mock_calculate_texp, mock_read_configuration, mock_set_verbosity
+    mock_texp, mock_parse_params, mock_parse_file, mock_set_verbosity
 ):
     """Test that -q flag sets error verbosity level."""
-    mock_read_configuration.return_value = ({}, {})
-    mock_calculate_texp.return_value = (np.array([1.0]), {})
+    mock_parse_file.return_value = {}
+    mock_parse_params.return_value = {}
+    mock_texp.return_value = (np.array([1.0]), {})
 
     with patch("sys.argv", ["pyedith", "-q", "etc", "--edith", "test.edith"]):
         with patch("builtins.print"):
@@ -343,14 +377,16 @@ def test_main_quiet_flag_sets_error_level(
 
 
 @patch("pyEDITH.cli.set_verbosity")
-@patch("pyEDITH.cli.parse_input.read_configuration")
+@patch("pyEDITH.cli.parse_input.parse_input_file")
+@patch("pyEDITH.cli.parse_input.parse_parameters")
 @patch("pyEDITH.cli.calculate_texp")
 def test_main_quiet_long_flag_sets_error_level(
-    mock_calculate_texp, mock_read_configuration, mock_set_verbosity
+    mock_texp, mock_parse_params, mock_parse_file, mock_set_verbosity
 ):
     """Test that --quiet flag sets error verbosity level."""
-    mock_read_configuration.return_value = ({}, {})
-    mock_calculate_texp.return_value = (np.array([1.0]), {})
+    mock_parse_file.return_value = {}
+    mock_parse_params.return_value = {}
+    mock_texp.return_value = (np.array([1.0]), {})
 
     with patch("sys.argv", ["pyedith", "--quiet", "etc", "--edith", "test.edith"]):
         with patch("builtins.print"):
@@ -359,14 +395,16 @@ def test_main_quiet_long_flag_sets_error_level(
 
 
 @patch("pyEDITH.cli.set_verbosity")
-@patch("pyEDITH.cli.parse_input.read_configuration")
+@patch("pyEDITH.cli.parse_input.parse_input_file")
+@patch("pyEDITH.cli.parse_input.parse_parameters")
 @patch("pyEDITH.cli.calculate_texp")
 def test_main_quiet_overrides_verbose(
-    mock_calculate_texp, mock_read_configuration, mock_set_verbosity
+    mock_texp, mock_parse_params, mock_parse_file, mock_set_verbosity
 ):
     """Test that --quiet flag takes precedence over -vv flag."""
-    mock_read_configuration.return_value = ({}, {})
-    mock_calculate_texp.return_value = (np.array([1.0]), {})
+    mock_parse_file.return_value = {}
+    mock_parse_params.return_value = {}
+    mock_texp.return_value = (np.array([1.0]), {})
 
     with patch(
         "sys.argv", ["pyedith", "--quiet", "-vv", "etc", "--edith", "test.edith"]
@@ -727,7 +765,8 @@ def test_reference_snr_independent_single(
 @patch("pyEDITH.cli.calculate_snr")
 @patch("pyEDITH.cli.calculate_texp")
 def test_reference_snr_coupled_scalar(mock_texp, mock_snr, mock_parameters_reference):
-    """Mode 3: single wavelength, scalar time applied to ALL filters."""
+    """Mode 3 (coupled): a single wavelength yields one scalar time, broadcast
+    to ALL filters as a {name: time} dict; the scalar is passed to calculate_snr."""
     fname = mock_parameters_reference["filter_list"][0].name
     mock_texp.return_value = (
         {
@@ -744,8 +783,13 @@ def test_reference_snr_coupled_scalar(mock_texp, mock_snr, mock_parameters_refer
         mock_parameters_reference, 2.0, coupled=True
     )
 
-    assert texp == 30.0 * u.s
-    assert mock_snr.call_args[0][1] == 30.0 * u.s  # scalar passed in coupled
+    # Coupled now returns a DICT: {filter_name: scalar_time} for every filter.
+    assert isinstance(texp, dict)
+    assert texp[fname] == 30.0 * u.s
+
+    # The SCALAR (not the dict) is what gets passed to calculate_snr in coupled mode.
+    assert mock_snr.call_args[0][1] == 30.0 * u.s
+
     assert fname in snrs
 
 
@@ -774,10 +818,11 @@ def test_reference_snr_out_of_range_raises(
 
 @patch("pyEDITH.cli.calculate_snr")
 @patch("pyEDITH.cli.calculate_texp")
-def test_reference_snr_warns_too_few_wavelengths(
-    mock_texp, mock_snr, mock_parameters_two_filters, caplog
+def test_reference_snr_rejects_too_few_wavelengths(
+    mock_texp, mock_snr, mock_parameters_two_filters
 ):
-    """Independent mode with fewer wavelengths than filters warns about coupled."""
+    """Independent mode with a wavelength/filter count mismatch raises ValueError
+    and points the user toward coupled mode."""
     mock_texp.return_value = (
         {
             "VIS": {
@@ -793,10 +838,36 @@ def test_reference_snr_warns_too_few_wavelengths(
     )
     mock_snr.return_value = ({}, {})
 
-    with caplog.at_level(logging.ERROR, logger="pyEDITH"):
+    with pytest.raises(ValueError, match="pass coupled=True instead."):
         calculate_snr_from_reference_lambda(mock_parameters_two_filters, [0.5])
 
-    assert "coupled=true" in caplog.text.lower()
+
+@patch("pyEDITH.cli.calculate_snr")
+@patch("pyEDITH.cli.calculate_texp")
+def test_reference_snr_rejects_too_many_wavelengths(
+    mock_texp, mock_snr, mock_parameters_two_filters
+):
+    """Independent mode with MORE wavelengths than filters also raises ValueError."""
+    mock_texp.return_value = (
+        {
+            "VIS": {
+                "wavelength": np.array([0.5]) * u.um,
+                "exposure_time": np.array([10.0]) * u.s,
+            },
+            "NIR": {
+                "wavelength": np.array([1.2]) * u.um,
+                "exposure_time": np.array([14.0]) * u.s,
+            },
+        },
+        {},
+    )
+    mock_snr.return_value = ({}, {})
+
+    # Two filters, three wavelengths -> count mismatch -> ValueError.
+    with pytest.raises(ValueError, match="pass coupled=True instead."):
+        calculate_snr_from_reference_lambda(
+            mock_parameters_two_filters, [0.5, 1.2, 1.8]
+        )
 
 
 @patch("pyEDITH.cli.calculate_snr")
@@ -827,7 +898,7 @@ def test_coupled_warns_on_extra_wavelengths(
     assert "only the first" in caplog.text.lower()
     assert "ignored" in caplog.text.lower()
     # And the time came from the FIRST wavelength (1.5 → 20.0), not the second
-    assert texp == 20.0 * u.s
+    assert texp[fname] == 20.0 * u.s
 
 
 @patch("pyEDITH.cli.calculate_snr")
@@ -879,7 +950,41 @@ def test_single_filter_coupled_matches_independent(
         mock_parameters_reference, [1.5]
     )
 
-    # Same driving time—coupled returns a scalar, independent a dict of one
-    assert t_coupled == 20.0 * u.s
-    assert t_independent == {fname: 20.0 * u.s}
-    assert t_coupled == t_independent[fname]
+    assert t_coupled == t_independent
+    assert t_coupled == {fname: 20.0 * u.s}  # sanity: expected driving time
+
+
+@patch("pyEDITH.cli.calculate_snr")
+@patch("pyEDITH.cli.calculate_texp")
+def test_reference_snr_rejects_two_wavelengths_same_filter(mock_texp, mock_snr):
+    """Independent mode: two wavelengths resolving to the SAME filter raises
+    ValueError (the collision guard)."""
+    # Filter A contains everything; filter B contains nothing.
+    filt_a = MagicMock()
+    filt_a.name = "A"
+    filt_a.contains.return_value = True
+    filt_b = MagicMock()
+    filt_b.name = "B"
+    filt_b.contains.return_value = False
+
+    parameters = {"filter_list": [filt_a, filt_b], "observing_mode": "IMAGER"}
+
+    mock_texp.return_value = (
+        {
+            "A": {
+                "wavelength": np.array([0.5, 0.6]) * u.um,
+                "exposure_time": np.array([10.0, 11.0]) * u.s,
+            },
+            "B": {
+                "wavelength": np.array([1.2, 1.5]) * u.um,
+                "exposure_time": np.array([14.0, 15.0]) * u.s,
+            },
+        },
+        {},
+    )
+    mock_snr.return_value = ({}, {})
+
+    # Two wavelengths (passes the != guard: 2 == 2 filters), but BOTH land in
+    # filter A (contains=True) -> second iteration collides -> ValueError.
+    with pytest.raises(ValueError, match="already targeted by another wavelength"):
+        calculate_snr_from_reference_lambda(parameters, [0.5, 0.6])
