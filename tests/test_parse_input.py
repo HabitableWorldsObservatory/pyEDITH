@@ -497,8 +497,15 @@ def test_parse_input_file_legacy_secondary_missing_secondary_wavelength():
         os.unlink(tmp.name)
 
 
-def test_parse_input_file_legacy_secondary_missing_bandwidth():
-    """Test that a legacy secondary_ file with no bandwidth raises KeyError."""
+def test_parse_input_file_legacy_secondary_missing_bandwidth(caplog):
+    """A legacy secondary_ file that omits 'bandwidth' should NOT raise.
+
+    The published paper file omits 'bandwidth' entirely, so the legacy shim
+    defaults each band's top-hat width to the historical value (0.2) and logs
+    an informative message, rather than failing. This reproduces the published
+    behaviour. (Contrast with the modern filter_* path, where a missing
+    bandwidth is a hard error.)
+    """
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".edith") as tmp:
         tmp.write("""
         observing_mode = IMAGER
@@ -507,10 +514,29 @@ def test_parse_input_file_legacy_secondary_missing_bandwidth():
         """)
         tmp.flush()
 
-        with pytest.raises(KeyError, match="requires 'bandwidth'"):
-            _ = parse_input_file(tmp.name)
+        with caplog.at_level(logging.INFO, logger="pyEDITH"):
+            result = parse_input_file(tmp.name)
 
         os.unlink(tmp.name)
+
+    # 1. It no longer raises, and produces a usable canonical form.
+    assert "filter_list" in result
+    assert len(result["filter_list"]) == 2
+    assert result["bandwidth"] == 0.2  # the historical default was applied
+
+    # 2. The user was told, explicitly, that the default kicked in.
+    default_msgs = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.INFO
+        and record.name == "pyEDITH"
+        and "no 'bandwidth'" in record.message
+    ]
+    assert len(default_msgs) == 1, (
+        f"Expected exactly one INFO message about the defaulted bandwidth, "
+        f"got {len(default_msgs)}: {[r.message for r in default_msgs]}"
+    )
+    assert "0.2" in default_msgs[0].message
 
 
 def test_parse_input_file_legacy_secondary_overlapping_bands():
@@ -2127,6 +2153,33 @@ def test_parse_input_file_filter_type_set_from_observing_mode(valid_spectrum_fil
         os.unlink(tmp.name)
 
 
+def test_parse_parameters_preserves_filter_list():
+    """parse_parameters must carry filter_list through unchanged.
+
+    parse_parameters rebuilds its output dict from scratch via explicit
+    whitelists; filter_list belongs to none of them. This test pins the
+    explicit preservation step, without which parse_filters would wrongly
+    fall back to the obsolete _build_legacy_filters path (the very bug this
+    line was added to fix).
+    """
+    sentinel_filters = [
+        Filter("A", center=0.5 * u.um, bandwidth=0.2, type="IMAGER"),
+        Filter("B", center=1.0 * u.um, bandwidth=0.2, type="IMAGER"),
+    ]
+    parameters = {
+        "observing_mode": "IMAGER",
+        "wavelength": [0.5, 1.0],
+        "filter_list": sentinel_filters,
+    }
+
+    parsed = parse_parameters(parameters)
+
+    # The branch under test: filter_list is present and must survive.
+    assert "filter_list" in parsed
+    assert parsed["filter_list"] is sentinel_filters  # same object, not dropped/copied
+    assert [f.name for f in parsed["filter_list"]] == ["A", "B"]
+
+
 # ============================================================================
 # Tests for parse_filters - Filter handling
 # ============================================================================
@@ -2315,17 +2368,6 @@ def test_parse_filters_legacy_imager_array_wavelength_single_element():
     assert len(filters) == 1
     assert filters[0].center.value == pytest.approx(0.55)
     assert filters[0].bandwidth == 0.15
-
-
-def test_parse_filters_legacy_imager_missing_bandwidth():
-    """Test error when IMAGER mode lacks bandwidth parameter."""
-    parameters = {
-        "wavelength": 0.6,
-        "observing_mode": "IMAGER",
-    }
-
-    with pytest.raises(KeyError):
-        parse_filters(parameters)
 
 
 # ============================================================================
@@ -2532,6 +2574,87 @@ def test_parse_filters_legacy_ifs_bounds_already_quantity():
     assert result[0].type == "IFS"
     assert np.isclose(result[0].low.to(u.um).value, 0.4)
     assert np.isclose(result[0].high.to(u.um).value, 0.8)
+
+
+def test_build_legacy_filters_imager_defaults_bandwidth(caplog):
+    """Guardian test for the legacy IMAGER filter-synthesis path.
+
+    This exercises `_build_legacy_filters` via `parse_filters` for an input that
+    has NO `filter_list` and NO `bandwidth` -- the deprecated scalar path. No
+    user-facing example file uses this path anymore.
+
+    Two invariants are pinned:
+      1. A single IMAGER Filter is synthesised, centred on the sole input
+         wavelength.
+      2. A missing `bandwidth` degrades gracefully to the historical default
+         (LEGACY_DEFAULT_BANDWIDTH = 0.2), with an informative warning, rather
+         than raising a KeyError.
+    """
+    # Minimal legacy IMAGER parameters: a single wavelength, no filter_list,
+    # no bandwidth. This forces parse_filters down the _build_legacy_filters
+    # branch and then into its bandwidth-default fallback.
+    parameters = {
+        "observing_mode": "IMAGER",
+        "wavelength": 0.5 * WAVELENGTH,
+    }
+
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
+        active = parse_filters(parameters)
+
+    # --- Invariant 1: exactly one IMAGER filter, centred on the input wavelength ---
+    assert len(active) == 1, f"Expected one synthesised filter, got {len(active)}."
+    f = active[0]
+    assert f.type == "IMAGER"
+    np.testing.assert_allclose(
+        f.center.to(u.um).value,
+        0.5,
+        rtol=1e-9,
+        err_msg="Legacy filter should be centred on the sole input wavelength.",
+    )
+
+    # --- Invariant 2: bandwidth defaulted to the historical 0.2 ---
+    # The band half-width is center * bandwidth / 2 = 0.5 * 0.2 / 2 = 0.05,
+    # so the band should span [0.45, 0.55] um. This confirms the 0.2 default
+    # actually propagated into the Filter, not merely that nothing crashed.
+    np.testing.assert_allclose(
+        f.low.to(u.um).value,
+        0.45,
+        rtol=1e-9,
+        err_msg="Lower band edge implies bandwidth != 0.2 default.",
+    )
+    np.testing.assert_allclose(
+        f.high.to(u.um).value,
+        0.55,
+        rtol=1e-9,
+        err_msg="Upper band edge implies bandwidth != 0.2 default.",
+    )
+
+    # --- The user was warned the legacy path was taken (message #1) ---
+    legacy_path_msgs = [
+        r
+        for r in caplog.records
+        if r.name == "pyEDITH"
+        and r.levelno == logging.WARNING
+        and "legacy parameters" in r.message.lower()
+    ]
+    assert len(legacy_path_msgs) == 1, (
+        f"Expected exactly one WARNING about the legacy filter path, "
+        f"got {len(legacy_path_msgs)}: {[r.message for r in legacy_path_msgs]}"
+    )
+
+    # --- The user was warned the bandwidth was defaulted (message #2) ---
+    default_bw_msgs = [
+        r
+        for r in caplog.records
+        if r.name == "pyEDITH"
+        and r.levelno == logging.WARNING
+        and "no 'bandwidth' supplied" in r.message
+    ]
+    assert len(default_bw_msgs) == 1, (
+        f"Expected exactly one WARNING about the defaulted bandwidth, "
+        f"got {len(default_bw_msgs)}: {[r.message for r in default_bw_msgs]}"
+    )
+    assert "0.2" in default_bw_msgs[0].message
 
 
 # ============================================================================

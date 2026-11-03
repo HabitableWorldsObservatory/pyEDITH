@@ -15,7 +15,6 @@
 snr = 7.0                           ; signal-to-noise ratio at desired wavelength {will be propagated to be len(wavelength)} 
 CRb_multiplier  = 2.                ; factor to multiply to remove background
 psf_trunc_ratio = 0.35              ; truncation ratio of the PSF
-regrid_wavelength = False           ; we don't want to regrid over higher spectral resolution since this is just an example
 
 ;--- STAR PARAMETERS ---
 distance = 10.                      ; distance to star (pc)
@@ -31,6 +30,12 @@ separation = 0.1                    ; separation of planet (arcsec)
 observatory_preset = EAC1
 observing_mode =  IFS
 
+
+;--- FILTER PARAMETERS (optional) ---
+filter_name       = ifs_filter            ; label per filter
+filter_center     = 0.7                  ; central wavelength per filter (micron)
+filter_bandwidth   = 0.1                   ; fractional bandwidth per filter
+filter_resolution = 140                    ; required only if observing_mode = IFS
 
 ;--- IFS MODE ONLY: PATH TO SPECTRA --- 
 ; (this is a very bright planet, high SNR/low exposure time expected)
