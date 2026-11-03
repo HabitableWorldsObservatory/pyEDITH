@@ -133,9 +133,23 @@ class Filter:
             self.delta_wavelength = dlam * WAVELENGTH
 
     def contains(self, wavelength: u.Quantity) -> bool:
-        """Check if a wavelength falls within this filter."""
+        """Check if a wavelength falls within this filter.
+
+        Parameters
+        ----------
+        wavelength : astropy.units.Quantity
+            The wavelength to test. A bare number is interpreted in the
+            default WAVELENGTH unit.
+
+        Returns
+        -------
+        bool
+            True if ``low <= wavelength <= high``.
+        """
+        if not isinstance(wavelength, u.Quantity):
+            wavelength = wavelength * WAVELENGTH
         wavelength = wavelength.to(WAVELENGTH)
-        return (wavelength >= self.low) and (wavelength <= self.high)
+        return bool((wavelength >= self.low) and (wavelength <= self.high))
 
     def __repr__(self):
         if self.type == "IMAGER" or self.resolution is None:
