@@ -32,7 +32,7 @@
 
 
    ```{eval-rst}
-   .. automodule:: pyEDITH.components.telescopes
+   .. automodule:: pyEDITH.telescopes
       :members:
       :undoc-members:
       :show-inheritance:
@@ -42,7 +42,7 @@
    ```
 
    ```{eval-rst}
-   .. automodule:: pyEDITH.components.coronagraphs
+   .. automodule:: pyEDITH.coronagraphs
       :members:
       :undoc-members:
       :show-inheritance:
@@ -54,7 +54,7 @@
 
 
    ```{eval-rst}
-   .. automodule:: pyEDITH.components.detectors
+   .. automodule:: pyEDITH.detectors
       :members:
       :undoc-members:
       :show-inheritance:
