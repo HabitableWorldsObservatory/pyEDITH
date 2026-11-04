@@ -33,7 +33,7 @@ Fp/Fs =  1e-10                              ; planet contrast at desired wavelen
 ;--- OBSERVATORY PARAMETERS ---
 observatory_preset = ToyModel
 observing_mode =  IMAGER
-T_optical = 0.85                             ; optical throughput. Needs to be provided in ToyModel
+T_optical = 0.532                             ; optical throughput 
 
 ;--- FILTERS ---
 filter_name      = toy_filter

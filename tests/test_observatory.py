@@ -37,6 +37,8 @@ from pyEDITH.units import (
 )
 from pyEDITH.filters import Filter
 from yippy import Coronagraph as yippycoro
+import logging
+from pyEDITH.observatory import DEFAULT_OPTICS_THROUGHPUT
 
 
 # Reset presets just in case a test changes them.
@@ -1549,20 +1551,57 @@ def test_calculate_optics_throughput_from_eac_config(
     assert called_spectral is spectral
 
 
-def test_calculate_optics_throughput_no_config_raises(
-    configured_mock_observatory, mock_observation_imager, mock_scene
+def test_calculate_optics_throughput_no_config_uses_default(
+    configured_mock_observatory, mock_observation_imager, mock_scene, caplog
 ):
-    """Test that ValueError is raised when no T_optical and no EAC config are available."""
+    """With no T_optical and no EAC config (ToyModel/default case), the optics
+    throughput falls back to DEFAULT_OPTICS_THROUGHPUT rather than raising.
+
+    This replaces the former "no config -> ValueError" contract. The unified
+    model represents optics throughput as a single combined curve; when neither
+    an explicit T_optical nor an EAC configuration supplies it, a documented
+    default stands in (the ToyModel/default path), broadcast across the
+    wavelength grid.
+    """
     configured_mock_observatory.configuration = None
     parameters = {"observing_mode": "IMAGER", "wavelength": 0.5}
     mediator = ObservatoryMediator(
         configured_mock_observatory, mock_observation_imager, mock_scene
     )
 
-    with pytest.raises(
-        ValueError, match="Could not calculate optics throughput from the YAML files"
-    ):
+    with caplog.at_level(logging.INFO, logger="pyEDITH"):
         configured_mock_observatory.calculate_optics_throughput(parameters, mediator)
+
+    tp = configured_mock_observatory.optics_throughput
+
+    # 1. It no longer raises; a throughput is produced.
+    assert tp is not None
+
+    # 2. It is the documented default, broadcast across the observation's
+    #    wavelength grid (length matches, every element equals the default).
+    obs_wavelength = mediator.get_observation_parameter("wavelength").value
+    assert len(tp) == len(
+        np.atleast_1d(obs_wavelength)
+    ), "Default throughput must be broadcast to the full wavelength grid."
+    np.testing.assert_allclose(
+        tp.to(DIMENSIONLESS).value,
+        DEFAULT_OPTICS_THROUGHPUT,
+        rtol=1e-12,
+        err_msg="Fallback throughput must equal DEFAULT_OPTICS_THROUGHPUT.",
+    )
+
+    # 3. The user was told the default kicked in
+    default_msgs = [
+        r
+        for r in caplog.records
+        if r.name == "pyEDITH"
+        and r.levelno == logging.INFO
+        and "default optics throughput" in r.message.lower()
+    ]
+    assert len(default_msgs) == 1, (
+        f"Expected exactly one INFO message about the defaulted throughput, "
+        f"got {len(default_msgs)}: {[r.message for r in default_msgs]}"
+    )
 
 
 # ============================================================================
