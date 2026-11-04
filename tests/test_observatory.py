@@ -37,6 +37,8 @@ from pyEDITH.units import (
 )
 from pyEDITH.filters import Filter
 from yippy import Coronagraph as yippycoro
+import logging
+from pyEDITH.observatory import DEFAULT_OPTICS_THROUGHPUT
 
 # ============================================================================
 # Mock Helper Functions
@@ -731,7 +733,7 @@ def test_calculate_optics_throughput_ifs_mode(
 
 
 def test_calculate_optics_throughput_from_components(
-    configured_mock_observatory, mock_observation_imager, mock_scene
+    configured_mock_observatory, mock_observation_imager, mock_scene, caplog
 ):
     """Test calculation of optics throughput from component throughputs."""
     parameters = {"observing_mode": "IMAGER", "wavelength": 0.5}

@@ -241,11 +241,6 @@ class EACTelescope(Telescope):
             and telescope specifications
         mediator : ObservatoryMediator
             Mediator object providing access to observation and coronagraph parameters
-
-        Raises
-        ------
-        KeyError
-            If the observing mode is not 'IMAGER' or 'IFS'
         """
         parameters = parse_input.parse_parameters(parameters)
 
@@ -261,7 +256,7 @@ class EACTelescope(Telescope):
                 telescope_params, mediator.get_observation_parameter("wavelength_range")
             )
 
-        elif mediator.get_observation_parameter("observing_mode") == "IFS":
+        else:  # IFS case
             # interpolate telescope throughput onto native wavelength grid
             telescope_params = utils.interpolate_over_bandpass(
                 telescope_params, mediator.get_observation_parameter("wavelength")

@@ -271,8 +271,6 @@ class EACDetector(Detector):
 
         Raises
         ------
-        KeyError
-            If the observing mode is not 'IMAGER' or 'IFS'
         AssertionError
             If the QE array contains NaN values after processing
         """
@@ -293,7 +291,7 @@ class EACDetector(Detector):
                 mediator.get_observation_parameter("wavelength_range"),
             )
 
-        elif mediator.get_observation_parameter("observing_mode") == "IFS":
+        else:  # can only be IFS
             detector_params = utils.interpolate_over_bandpass(
                 raw_detector_params, mediator.get_observation_parameter("wavelength")
             )
@@ -331,7 +329,7 @@ class EACDetector(Detector):
             qe_arr[
                 mediator.get_observation_parameter("wavelength") >= 1 * WAVELENGTH
             ] = detector_params["qe_nir"]
-        elif parameters["observing_mode"] == "IFS":
+        else:  # IFS case
             qe_arr[
                 mediator.get_observation_parameter("wavelength") < 1 * WAVELENGTH
             ] = detector_params["qe_vis"][

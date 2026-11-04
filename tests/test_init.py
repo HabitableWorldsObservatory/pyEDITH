@@ -361,17 +361,17 @@ def test_main_functions_importable():
     """Check that main functions are importable from pyEDITH."""
     from pyEDITH import (
         calculate_exposure_time_or_snr,
-        generate_radii,
         calculate_texp,
         calculate_snr,
+        calculate_snr_from_reference_lambda,
     )
 
     assert all(
         [
             calculate_exposure_time_or_snr,
-            generate_radii,
             calculate_texp,
             calculate_snr,
+            calculate_snr_from_reference_lambda,
         ]
     )
 
@@ -415,7 +415,6 @@ def test_all_contents():
         "calculate_texp",
         "calculate_snr",
         "parse_input",
-        "generate_radii",
     ]
     for item in expected:
         assert item in pyEDITH.__all__, f"{item} not in __all__"
