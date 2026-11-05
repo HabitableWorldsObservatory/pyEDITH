@@ -77,9 +77,9 @@ Coronagraphy trade studies for HWO are ongoing, and instrument parameters remain
 
 More up-to-date information can be found on [HWO’s website](https://science.nasa.gov/astrophysics/programs/habitable-worlds-observatory/).
 
-```
+:::
 
-```{dropdown} What wavelength boundaries should I assume for the various channels?
+:::{dropdown} What wavelength boundaries should I assume for the various channels?
 Coronagraphy trade studies for HWO are ongoing, and instrument parameters remain preliminary. In literature, common wavelength boundaries are:
 
 - **UV:** between ~200–300 nm and ~500–530 nm
@@ -88,13 +88,13 @@ Coronagraphy trade studies for HWO are ongoing, and instrument parameters remain
 
 More up-to-date information can be found on [HWO’s website](https://science.nasa.gov/astrophysics/programs/habitable-worlds-observatory/).
 
-```
+:::
 
 ---
 
 ## Input Parameters & Data Handling
 
-```{dropdown} What input spectra can I use in pyEDITH, and how do I load spectral templates?
+:::{dropdown} What input spectra can I use in pyEDITH, and how do I load spectral templates?
 You can use any custom stellar or planetary spectrum (such as planet-to-star flux ratio $F_p/F_s$ or stellar flux $F_{\text{star}}$) as long as it spans your requested wavelength grid.
 
 For convenience, standard planetary and stellar spectral templates can be retrieved directly from the connected [`hwotools`](https://github.com/HabitableWorldsObservatory/hwotools) GitHub repository or local files. As demonstrated in the [ExoEarth Spectroscopy Tutorial](exoearth_spectroscopy_tutorial.ipynb), templates (e.g., Modern Earth, Archean Earth, or stellar models) can be loaded and interpolated onto your target wavelength grid:
@@ -108,7 +108,7 @@ lam_grid = parameters["wavelength"]
 parameters["Fp/Fs"] = np.interp(lam_grid, template_wavelength, template_fp_fs)
 ```
 
-```
+:::
 
 :::{dropdown} Can input parameters be single floats when evaluating multiple wavelengths?
 Yes. Parameters that vary with wavelength (such as `wavelength`, `snr`, `Fstar_10pc`, `Fp/Fs`) can accept both floats and lists. If wavelength is provided as a list and another wavelength-dependent parameter is supplied as a single float, `pyEDITH` automatically expands that float into a list matching the length of wavelength.
