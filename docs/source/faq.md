@@ -4,7 +4,7 @@ Welcome to the **pyEDITH** documentation FAQ. This page addresses common setup i
 
 ---
 
-## 1. Installation & Environment Configuration
+## Installation & Environment Configuration
 
 <details>
 <summary><strong>What are the <code>SCI_ENG_DIR</code> and <code>YIP_CORO_DIR</code> environment variables?</strong></summary>
@@ -28,7 +28,7 @@ export YIP_CORO_DIR="/path/to/yip/folder" # Optional if using custom YIP files
 After updating the file, run `source ~/.bashrc` (or `source ~/.zshrc`) to update your current terminal session.
 </details>
 
-## 2. Coronagraph Configurations
+## Coronagraph Configurations
 
 <details>
 <summary><strong>How is the Inner Working Angle (IWA) handled, and why do I get an IWA flag when placing a planet?</strong></summary>
@@ -49,24 +49,25 @@ Coronagraph performance characteristics are stored within Yield Input Package (Y
 `pyEDITH` uses the yippy package to handle coronagraph input packages. If a specified coronagraph preset (such as `eac1_aavc_2d`) is not found in your local directory or cache, `pyEDITH` will automatically attempt to fetch and cache it from the remote database.
 </details>
 
----
 
-## 3. Wavelength Channels
+## Wavelength Channels
 
 <details>
 <summary><strong>Why do I get <code>ValueError: A value in x_new is below the interpolation range's minimum value</code> when setting low wavelength bounds?</strong></summary>
 
 This error originates from `scipy.interpolate.interp1d`. It occurs when the channel wavelength bounds (`lam_low`, `lam_high`) extend beyond the wavelength range of the input spectrum file (e.g., `earth_refl_demo`).
 
-* **Solution:** Ensure your input stellar/planetary spectrum covers a slightly wider spectral range than the requested channel bounds. For example, to evaluate down to $\lambda = 0.4\,\mu\text{m}$, the input spectrum must contain data points below $0.4\,\mu\text{m}$ (e.g., starting at $\le 0.35\,\mu\text{m}$).
+**Solution:** Ensure your input stellar/planetary spectrum covers a slightly wider spectral range than the requested channel bounds. For example, to evaluate down to $\lambda = 0.4\,\mu\text{m}$, the input spectrum must contain data points below $0.4\,\mu\text{m}$ (e.g., starting at $\le 0.35\,\mu\text{m}$).
 </details>
 
 <details>
 <summary><strong>How should UV observations be configured in pyEDITH?</strong></summary>
 
 UV coronagraphy trade studies for HWO are ongoing, and instrument parameters remain preliminary:
-* **Resolution:** Low spectral resolution ($R = 7$) is currently assumed for UV spectroscopy mode.
+* **Resolution:** Low spectral resolution ($R = 7$) is generally assumed for UV spectroscopy mode.
 * **Photometry Option:** Alternatively, UV observations can be simulated in photometry/imaging mode using discrete broad photometric bands rather than spectroscopy mode.
+* **Throughput and Quantum Efficiency:** The current HWO specifications do not include prescription for optical paths and detector quantum efficiency for the UV channel. You must make some assumption on your own and feed ``T_optical`` (total optical throughput) and ``QE`` (quantum efficiency) for a hypothetical UV channel. For guidelines on how to vary observatory parameters, please refer to the (online documentation)[https://pyedith.readthedocs.io/en/latest/imaging_tutorial.html#3.2.-Vary-observatory-parameters].
+* **UV Coronagraph YIP files:** You should make some assumptions on the Coronagraph as well. We are working on a ToyModel UV coronagraph YIP file; if you need early access to it, please [get in touch](mailto:eleonora.alei@nasa.gov).
 </details>
 
 <details>
@@ -91,8 +92,24 @@ Coronagraphy trade studies for HWO are ongoing, and instrument parameters remain
 More up-to-date information can be found on [HWO's website](https://science.nasa.gov/astrophysics/programs/habitable-worlds-observatory/).
 </details>
 
----
-## 4. Input Parameters & Data Handling
+## Input Parameters & Data Handling
+
+<details>
+<summary><strong>What input spectra can I use in pyEDITH, and how do I load spectral templates?</strong></summary>
+
+You can use any custom stellar or planetary spectrum (such as planet-to-star flux ratio $F_p/F_s$ or stellar flux $F_{\text{star}}$) as long as it spans your requested wavelength grid.
+
+For convenience, standard planetary and stellar spectral templates can be retrieved directly from the connected [`hwotools`](https://github.com/HabitableWorldsObservatory/hwotools) GitHub repository or local files. As demonstrated in the [ExoEarth Spectroscopy Tutorial](https://pyedith.readthedocs.io/en/latest/exoearth_spectroscopy_tutorial.html), templates (e.g., Modern Earth, Archean Earth, or stellar models) can be loaded and interpolated onto your target wavelength grid:
+
+```python
+import numpy as np
+
+# Load template wavelength and flux ratio data from hwotools or local data files
+# Interpolate onto your active pyEDITH wavelength grid
+lam_grid = parameters["wavelength"]
+parameters["Fp/Fs"] = np.interp(lam_grid, template_wavelength, template_fp_fs)
+```
+</details>
 
 <details>
 <summary><strong>Can input parameters be single floats when evaluating multiple wavelengths?</strong></summary>
@@ -110,9 +127,8 @@ The `validation_output` dictionary contains detailed intermediate calculated phy
 * Instrument properties such as detector pixel scale (`det_pixscale_mas`) and dark current (`det_DC`)
 </details>
 
----
-
-## 5. Calculations & Multi-Band Strategy
+<!-- 
+## Calculations & Multi-Band Strategy
 
 <details>
 <summary><strong>How do I compute SNR for secondary bandpasses during simultaneous observations?</strong></summary>
@@ -141,10 +157,10 @@ snr_dict, ref_texp, validation_output = calculate_snr_from_reference_lambda(
     coupled=True
 )
 ```
-</details>
----
+</details> -->
 
-## 6. Troubleshooting & Logging
+
+## Troubleshooting & Logging
 
 <details>
 <summary><strong>How do I suppress detailed log messages during parameter grid searches?</strong></summary>
@@ -167,16 +183,33 @@ set_verbosity(level='quiet')
 * **noisefloor_PPF warning**: Indicates post-processing factor for noise floor was omitted in the input parameters, so `pyEDITH` applies the default value of 30.0.
 </details>
 
-What should I keep in mind when looping over observatory architectures or separations?
+</details> <details> <summary><strong>Why do I get a warning that a parameter is "locked" and cannot be overridden?</strong></summary>
+When using certain modes (such as EAC configurations or Yield Input Packages), specific parameters are locked to model-provided values to prevent accidental mismatches. If you attempt to pass in a different value for a locked parameter, pyEDITH will ignore your input, use the default model value, and issue a warning.
+
+**How to intentionally override a locked parameter:**
+If you intentionally want to bypass a locked parameter (e.g., for a specific trade study), you must explicitly add that parameter's name to an `overrides` list in your parameters dictionary. `pyEDITH` will then accept your custom value and log a warning stating the parameter was explicitly overridden per user request.
+
+*Notes on Overrides:*
+
+To prevent typos, any unrecognized names in your overrides list will raise a ValueError.
+If you override a parameter with an array of values, the array length must match your input wavelength array so it can be correctly rebinned. 
+
+More info on the [documentation](https://pyedith.readthedocs.io/en/stable/imaging_tutorial.html#3.2.-Vary-observatory-parameters). 
+</details> 
+
+
+<details> <summary><strong>What should I keep in mind when looping over observatory architectures or separations?</strong></summary>
 Whenever you change parameters that alter the underlying optical response or scene geometry (such as telescope diameter D, planet separation, or coronagraph architecture), you must re-initialize the Observatory object within your loop. Coronagraph response curves, core areas, and background terms vary dynamically with these geometry changes.
-Would you like to paste the specific email exchanges you replied to so we can extract additional Q&As to add to this page?
 
-## 5. Updates & Releases
+</details>
 
-### Q: How can I stay informed when a new release of `pyEDITH` is published?
 
-**A:** To receive notifications regarding code updates, releases, and discussions, click the **Watch** button (selecting *All Activity* or *Releases only*) at the top of the `pyEDITH` GitHub repository.
+## Updates & Releases
 
+<details> <summary><strong> How can I stay informed when a new release of `pyEDITH` is published?</strong></summary>
+
+To receive notifications regarding code updates, releases, and discussions, click the **Watch** button (selecting *All Activity* or *Releases only*) at the top of the `pyEDITH` GitHub repository.
+</details>
 
 ---
 *Cannot find a question? (Check the open issues!)[https://github.com/HabitableWorldsObservatory/pyEDITH/issues?q=is%3Aissue+state%3Aopen]*
