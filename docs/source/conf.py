@@ -20,13 +20,25 @@ author = "Alei, Eleonora & Currie, Miles et al."
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
 extensions = [
-    "sphinx.ext.autodoc",
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
     "nbsphinx",
+    "autoapi.extension",
     "myst_parser",
 ]
 
+autoapi_dirs = ["../../src/pyEDITH"]  # Path to your source folder
+autoapi_type = "python"
+
+# Replicate your current options globally
+autoapi_options = [
+    "members",
+    "undoc-members",
+    "show-inheritance",
+]
+autoapi_member_order = "bysource"
+# Suppress noisy static analysis import warnings from AutoAPI
+suppress_warnings = ["autoapi.python_import_resolution", "ref.python"]
 
 source_suffix = {
     ".rst": "restructuredtext",

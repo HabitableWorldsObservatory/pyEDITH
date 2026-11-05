@@ -29,5 +29,6 @@ imaging_early-vs-modern_Venus
 yippy_guide
 glossary
 validation
-api
+faq
+autoapi/index
 ```
