@@ -1,16 +1,14 @@
-"""Integration smoke tests: run every curated example .edith file through the
-`etc` and `snr` CLI modes and assert they complete without crashing.
+"""Integration tests: everything that runs real pyEDITH code end-to-end
+(no engine mocking). Three kinds live here, by design:
 
-These are deliberately *shallow*: they assert the pipeline runs end-to-end and
-produces output, NOT that the numbers are correct (that is the job of the
-golden-master / equivalence tests). Their value is catching regressions where a
-refactor silently breaks a whole input file or mode.
+  1. SMOKE (test_smoke_*): every example file through etc/snr/etc2snr; asserts
+     it runs and prints, NOT that numbers are right. Auto-discovers inputs/.
+  2. CONTRACT (test_api_*): the calculate_* functions called directly on native
+     Python types; asserts return shapes and the coupling behaviour.
+  3. EQUIVALENCE (test_api_and_file_paths_agree): the file front-end and the
+     Python-API front-end must compute identical physics.
 
-New .edith files dropped into inputs/ are discovered automatically, so the suite
-scales without edits. EAC-dependent files are skipped (not failed) if the
-optional engineering-data packages (eacy, yippy) are not importable, so the
-suite stays honest on machines lacking that private/development tooling.
-
+Mocked unit tests of main()'s argv-translation live in test_cli.py, not here.
 """
 
 import glob
@@ -21,10 +19,22 @@ import pytest
 
 from pyEDITH import cli
 
+import numpy as np
+import astropy.units as u
+
+
+from pyEDITH.parse_input import parse_input_file, parse_parameters
+from pyEDITH.filters import Filter
+
+from pyEDITH.cli import (
+    calculate_texp,
+    calculate_snr,
+    calculate_snr_from_reference_lambda,
+)
+
 # ---------------------------------------------------------------------------
-# Discovery: glob the curated inputs, anchored to the repo root (two levels up
-# from this test file: tests/ -> repo root -> inputs/). Anchoring to __file__
-# rather than the CWD makes discovery immune to where pytest is invoked from.
+# FRONT-END TESTS
+# Every example file, run through the CLI, completes and prints something.
 # ---------------------------------------------------------------------------
 _INPUTS_DIR = Path(__file__).resolve().parent.parent / "inputs"
 _EDITH_FILES = sorted(glob.glob(str(_INPUTS_DIR / "*.edith")))
@@ -106,46 +116,39 @@ def test_smoke_snr(edith_file, monkeypatch, capsys):
     assert out.strip(), f"snr produced no output for {Path(edith_file).name}"
 
 
-"""Integration tests for the PRIMARY (Python API) interface.
+@pytest.mark.integration
+def test_smoke_etc2snr(monkeypatch, capsys):
+    """etc2snr runs end-to-end on a known multi-filter file. Not parametrised
+    over all files, because etc2snr REQUIRES >=2 filters -- most example files
+    are single-filter and would (correctly) raise. So we name the file."""
+    _run_cli(
+        monkeypatch,
+        ["etc2snr", "--edith", "inputs/input_rasti_paper.edith", "--ref_lambda", "0.5"],
+    )
+    out = capsys.readouterr().out
+    assert out.strip(), "etc2snr produced no output."
 
-Users predominantly drive pyEDITH programmatically: they build a parameters dict
-with native types (astropy Quantities, pre-constructed Filter objects) and call
-the calculate_* functions directly -- never touching parse_input_file or the CLI.
 
-Every other integration test we have exercises the FILE/CLI front-end. These
-tests guard the API front-end: specifically the isinstance(..., u.Quantity) and
-Filter-object branches in parse_parameters / normalize_list_shapes that the file
-path, feeding parsed strings/floats, does not reach.
-
-All tests use ToyModel: it has NO external engineering-data dependency (no eacy,
-yippy, hwome, no network), so these run deterministically in any environment,
-fast and slow suites alike -- no skip-guards required. That makes them a portable,
-always-on guardian of the interface your users actually depend on.
-"""
-
-import numpy as np
-import astropy.units as u
-import pytest
-
-from pyEDITH.parse_input import parse_input_file, parse_parameters
-from pyEDITH.filters import Filter
-
-# NOTE: these currently live in cli.py. If/when the API functions are promoted
-# to a non-CLI module (recommended -- the primary interface should not import
-# from the command-line layer), update this single import line.
-from pyEDITH.cli import (
-    calculate_texp,
-    calculate_snr,
-    calculate_snr_from_reference_lambda,
-)
+@pytest.mark.integration
+def test_legacy_secondary_format_runs_etc2snr(monkeypatch, capsys):
+    """A legacy primary/secondary .edith file is translated to a two-filter
+    canonical form and runs through etc2snr. Guards the unadvertised-but-
+    supported legacy path against silent breakage, since no user will report
+    its regression if it is undocumented."""
+    _run_cli(
+        monkeypatch,
+        ["etc2snr", "--edith", "inputs/input_rasti_paper.edith", "--ref_lambda", "0.5"],
+    )
+    out = capsys.readouterr().out
+    assert out.strip(), "Legacy secondary-format etc2snr produced no output."
 
 
 # ---------------------------------------------------------------------------
-# A single, hand-built ToyModel scenario, mirroring input_toymodel_basic.edith
-# but constructed the way a Python API user would: native Quantities and a real
-# Filter object, no file involved. Centralised in a fixture so the three tests
-# share one source of truth and cannot drift apart.
+# WORKFLOW TESTS
+# Every example file, run through the CLI, completes and prints something.
 # ---------------------------------------------------------------------------
+
+
 @pytest.fixture
 def toymodel_api_parameters():
     """A ToyModel IMAGER scenario as a native Python dict (the API entry point)."""
@@ -172,13 +175,8 @@ def toymodel_api_parameters():
     }
 
 
-# ===========================================================================
-# TEST 2 (written first, as #1 depends on its scenario): API native-type
-# end-to-end. Does the primary interface run etc and snr to completion with
-# native Quantity / Filter inputs?
-# ===========================================================================
 @pytest.mark.integration
-def test_api_native_types_etc(toymodel_api_parameters):
+def test_workflow_native_types_etc(toymodel_api_parameters):
     """`calculate_texp` runs end-to-end on a hand-built, Quantity-valued dict.
 
     Guards the API front-end: the parsed-from-file path never supplies a bare
@@ -200,7 +198,7 @@ def test_api_native_types_etc(toymodel_api_parameters):
 
 
 @pytest.mark.integration
-def test_api_native_types_snr(toymodel_api_parameters):
+def test_workflow_native_types_snr(toymodel_api_parameters):
     """`calculate_snr` runs end-to-end on the same hand-built dict, for a fixed
     exposure time. The API analogue of the `snr` smoke test."""
     parsed = parse_parameters(toymodel_api_parameters)
@@ -214,9 +212,105 @@ def test_api_native_types_snr(toymodel_api_parameters):
 
 
 # ===========================================================================
-# TEST 1 (highest value): API <-> file equivalence. The two front-ends must
-# converge on identical physics for the same scenario. A cross-interface
-# oracle -- neither path is the 'reference'; their AGREEMENT is the assertion.
+# TEST 3: the direct-engine API. Users call calculate_snr_from_reference_lambda
+# programmatically.
+# ===========================================================================
+@pytest.mark.integration
+def test_workflow_etc2snr():
+    """calculate_snr_from_reference_lambda, called directly.
+
+    Two filters, one reference wavelength driving both via a single shared
+    exposure time. Exercises the engine via its PROGRAMMATIC interface -- the
+    way API users reach etc2snr, independent of the CLI. This test is the guard
+    that the API signature stays stable as the CLI's sourcing is rewired.
+    """
+    params = parse_parameters(
+        {
+            "observing_mode": "IMAGER",
+            "observatory_preset": "ToyModel",
+            "wavelength": [0.5, 1.0],
+            "snr": 7.0,
+            "bandwidth": 0.2,
+            "CRb_multiplier": 2.0,
+            "photometric_aperture_radius": 0.85,
+            "distance": 10.0,
+            "Fstar_10pc": [122.9279, 120.0],
+            "FstarV_10pc": 115.59984,
+            "stellar_radius": 1.0,
+            "nzodis": 3.0,
+            "ra": 236.0,
+            "dec": 2.5,
+            "separation": 0.1,
+            "Fp/Fs": [1e-10, 1.1e-10],
+            "filter_list": [
+                Filter("blue", center=0.5 * u.um, bandwidth=0.2, type="IMAGER"),
+                Filter("red", center=1.0 * u.um, bandwidth=0.2, type="IMAGER"),
+            ],
+        }
+    )
+
+    # A single reference wavelength (0.5 um, in the blue band) drives the shared
+    # exposure time applied to BOTH filters.
+    snrs, texp, _ = calculate_snr_from_reference_lambda(
+        params, reference_wavelength=0.5
+    )
+
+    # The driving time is now a single shared scalar Quantity (not a per-filter
+    # dict -- that was the artefact of the removed independent mode).
+    assert isinstance(texp, u.Quantity)
+    assert np.isfinite(texp.to(u.s).value) and texp.to(u.s).value > 0
+
+    # Both bands are evaluated at that one shared time. The reference band (blue)
+    # should recover the target SNR (7.0); the other band (red) is evaluated at
+    # a time optimised for blue and will generally DIFFER -- that difference is
+    # the whole point of the coupled computation, so we assert it is NOT 7.0's twin.
+    assert np.all(np.isfinite(snrs["blue"]["snr"].value))
+    assert np.all(np.isfinite(snrs["red"]["snr"].value))
+    np.testing.assert_allclose(
+        snrs["blue"]["snr"].value,
+        7.0,
+        rtol=1e-3,
+        err_msg="Reference band (blue) should recover the target SNR.",
+    )
+
+
+@pytest.mark.integration
+def test_workflow_etc2snr_single_filter_raises():
+    """The engine's >=2-filter guard fires. A single-filter etc2snr is a
+    degenerate round-trip (solve t to hit a target, then recover it), so the
+    engine rejects it. This pins the ENGINE contract directly, so Step 3's
+    file-level validation layers a *second* check, not the only one.
+    """
+    params = parse_parameters(
+        {
+            "observing_mode": "IMAGER",
+            "observatory_preset": "ToyModel",
+            "wavelength": 0.5,
+            "snr": 7.0,
+            "bandwidth": 0.2,
+            "CRb_multiplier": 2.0,
+            "photometric_aperture_radius": 0.85,
+            "distance": 10.0,
+            "Fstar_10pc": 122.9279,
+            "FstarV_10pc": 115.59984,
+            "stellar_radius": 1.0,
+            "nzodis": 3.0,
+            "ra": 236.0,
+            "dec": 2.5,
+            "separation": 0.1,
+            "Fp/Fs": 1e-10,
+            "filter_list": [
+                Filter("blue", center=0.5 * u.um, bandwidth=0.2, type="IMAGER"),
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="at least two filters"):
+        calculate_snr_from_reference_lambda(params, reference_wavelength=0.5)
+
+
+# ===========================================================================
+# CHECKING API AND INPUT FILE VERSIONS
 # ===========================================================================
 @pytest.mark.integration
 def test_api_and_file_paths_agree(toymodel_api_parameters):
@@ -258,155 +352,3 @@ def test_api_and_file_paths_agree(toymodel_api_parameters):
             "hand-built API dict for nominally identical inputs."
         ),
     )
-
-
-# ===========================================================================
-# TEST 3: the direct-engine API. Users call calculate_snr_from_reference_lambda
-# programmatically, passing `reference` and `coupled` as ARGUMENTS (never via
-# the CLI's args.ref_lambda). This guards that primary-interface contract --
-# and is exactly the test that will prove Step 3 leaves the API signature
-# intact when it rewires the CLI's sourcing of those arguments.
-# ===========================================================================
-@pytest.mark.integration
-def test_api_reference_lambda_coupled():
-    """calculate_snr_from_reference_lambda, called directly (coupled mode).
-
-    Two filters, one reference wavelength driving both. Exercises the engine via
-    its PROGRAMMATIC interface -- the way API users reach etc2snr -- independent
-    of the CLI. Step 3 must not change this signature; this test is the guard.
-    """
-    params = parse_parameters(
-        {
-            "observing_mode": "IMAGER",
-            "observatory_preset": "ToyModel",
-            "wavelength": [0.5, 1.0],
-            "snr": 7.0,
-            "bandwidth": 0.2,
-            "CRb_multiplier": 2.0,
-            "photometric_aperture_radius": 0.85,
-            "distance": 10.0,
-            "Fstar_10pc": [122.9279, 120.0],
-            "FstarV_10pc": 115.59984,
-            "stellar_radius": 1.0,
-            "nzodis": 3.0,
-            "ra": 236.0,
-            "dec": 2.5,
-            "separation": 0.1,
-            "Fp/Fs": [1e-10, 1.1e-10],
-            "filter_list": [
-                Filter("blue", center=0.5 * u.um, bandwidth=0.2, type="IMAGER"),
-                Filter("red", center=1.0 * u.um, bandwidth=0.2, type="IMAGER"),
-            ],
-        }
-    )
-
-    # Coupled: a single reference wavelength (0.5 um) drives BOTH filters.
-    snrs, texps, _ = calculate_snr_from_reference_lambda(
-        params, reference=[0.5], coupled=True
-    )
-
-    # Both filters share the one exposure time (the coupled contract).
-    assert set(texps) == {"blue", "red"}
-    assert texps["blue"] == texps["red"], "Coupled mode must apply one time to all."
-
-    # The reference band (blue, 0.5 um) should recover the target SNR; the other
-    # band is evaluated at that same time and may differ -- we only assert it ran.
-    assert np.all(np.isfinite(snrs["blue"]["snr"].value))
-    assert np.all(np.isfinite(snrs["red"]["snr"].value))
-
-
-@pytest.mark.integration
-def test_api_reference_lambda_independent():
-    """calculate_snr_from_reference_lambda, called directly (independent mode).
-
-    One reference wavelength per filter; each filter solved on its own terms.
-    Exercises the engine's independent path and its len(reference)==len(filters)
-    contract, programmatically -- the way API users reach etc2snr, independent
-    of the CLI.
-    """
-    params = parse_parameters(
-        {
-            "observing_mode": "IMAGER",
-            "observatory_preset": "ToyModel",
-            "wavelength": [0.5, 1.0],
-            "snr": 7.0,
-            "bandwidth": 0.2,
-            "CRb_multiplier": 2.0,
-            "photometric_aperture_radius": 0.85,
-            "distance": 10.0,
-            "Fstar_10pc": [122.9279, 120.0],
-            "FstarV_10pc": 115.59984,
-            "stellar_radius": 1.0,
-            "nzodis": 3.0,
-            "ra": 236.0,
-            "dec": 2.5,
-            "separation": 0.1,
-            "Fp/Fs": [1e-10, 1.1e-10],
-            "filter_list": [
-                Filter("blue", center=0.5 * u.um, bandwidth=0.2, type="IMAGER"),
-                Filter("red", center=1.0 * u.um, bandwidth=0.2, type="IMAGER"),
-            ],
-        }
-    )
-
-    # Independent: one reference wavelength per filter (0.5 -> blue, 1.0 -> red).
-    snrs, texps, _ = calculate_snr_from_reference_lambda(
-        params, reference=[0.5, 1.0], coupled=False
-    )
-
-    # Each filter gets its OWN exposure time (the independent contract): the two
-    # times are solved separately, so they are generally distinct.
-    assert set(texps) == {"blue", "red"}
-
-    # Independent mode targets each band's own SNR, so BOTH bands should recover
-    # (approximately) the requested SNR of 7.0 -- this is the defining property
-    # that distinguishes it from coupled mode.
-    np.testing.assert_allclose(
-        snrs["blue"]["snr"].value,
-        7.0,
-        rtol=1e-3,
-        err_msg="Independent mode: blue band did not recover its target SNR.",
-    )
-    np.testing.assert_allclose(
-        snrs["red"]["snr"].value,
-        7.0,
-        rtol=1e-3,
-        err_msg="Independent mode: red band did not recover its target SNR.",
-    )
-
-
-@pytest.mark.integration
-def test_api_reference_lambda_length_mismatch_raises():
-    """The engine's len(reference) != len(filters) guard fires in independent
-    mode. This is the programmatic counterpart to the file-level validation we
-    will add in Step 3 -- here we pin the ENGINE contract directly, so Step 3's
-    file parsing is layering a *second* check, not the only one.
-    """
-    params = parse_parameters(
-        {
-            "observing_mode": "IMAGER",
-            "observatory_preset": "ToyModel",
-            "wavelength": [0.5, 1.0],
-            "snr": 7.0,
-            "bandwidth": 0.2,
-            "CRb_multiplier": 2.0,
-            "photometric_aperture_radius": 0.85,
-            "distance": 10.0,
-            "Fstar_10pc": [122.9279, 120.0],
-            "FstarV_10pc": 115.59984,
-            "stellar_radius": 1.0,
-            "nzodis": 3.0,
-            "ra": 236.0,
-            "dec": 2.5,
-            "separation": 0.1,
-            "Fp/Fs": [1e-10, 1.1e-10],
-            "filter_list": [
-                Filter("blue", center=0.5 * u.um, bandwidth=0.2, type="IMAGER"),
-                Filter("red", center=1.0 * u.um, bandwidth=0.2, type="IMAGER"),
-            ],
-        }
-    )
-
-    # Two filters but only one reference wavelength, in independent mode -> error.
-    with pytest.raises(ValueError, match="Independent mode"):
-        calculate_snr_from_reference_lambda(params, reference=[0.5], coupled=False)
