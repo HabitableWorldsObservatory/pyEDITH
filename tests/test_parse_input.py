@@ -296,6 +296,16 @@ def test_parse_input_file_legacy_secondary_builds_two_filters(legacy_secondary_f
     assert f1.name == "secondary"
     assert np.isclose(f0.center.to(u.um).value, 0.5)
     assert np.isclose(f1.center.to(u.um).value, 1.0)
+    # The sampling grid is the four-point top-hat (two samples per band).
+    assert len(variables["wavelength"]) == 4
+
+    # Fp/Fs painted flat per band: [prim, prim, sec, sec].
+    fpfs = variables["Fp/Fs"]
+    assert fpfs[0] == fpfs[1]  # primary band flat
+    assert fpfs[2] == fpfs[3]  # secondary band flat
+    assert fpfs[0] != fpfs[2]  # the two bands genuinely differ (6.3e-8 vs 6.4e-8)
+
+    assert not any(k.startswith("secondary") for k in variables)
 
 
 def test_parse_input_file_legacy_secondary_paints_top_hat(legacy_secondary_file):
