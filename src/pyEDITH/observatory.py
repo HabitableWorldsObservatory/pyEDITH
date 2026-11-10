@@ -309,12 +309,21 @@ class Observatory(ABC):  # abstract class
     @staticmethod
     def _load_eac_configuration(eac_keyword):
         """
-        Load EAC configuration from hwome (EAC4-6) or eacy (EAC1-3).
+        Load EAC configuration from one of three sources, in a unified format.
 
-        This is the single source of truth for EAC configuration loading.
-        It attempts to use hwome for EAC4-6, falls back to eacy if needed,
-        and uses eacy directly for EAC1-3. Returns a unified configuration
-        format regardless of source.
+        This is the single source of truth for EAC configuration loading, and it
+        returns the same unified configuration dictionary regardless of source:
+
+        - EAC4-6: the YAML summary file (produced by hwome, see
+          ``_ingest_from_summary``) is the default. It is self-contained and does
+          NOT require hwome to be installed. If the summary is unavailable (the
+          ``EAC_SUMMARY_DIR`` environment variable is unset, or the file is
+          missing), it falls back to the live hwome model (``_ingest_from_hwome``).
+        - EAC1-3: eacy (``_convert_eacy_to_unified_format``).
+
+        A summary file that is present but malformed is NOT silently skipped;
+        ``_ingest_from_summary`` raises in that case rather than masking corrupt
+        engineering data behind the hwome fallback.
 
         Parameters
         ----------
@@ -326,12 +335,22 @@ class Observatory(ABC):  # abstract class
         dict
             Unified configuration dictionary in hwome-like format, or None if loading fails
         """
-        # For EAC4-6, try hwome first
+        # For EAC4-6: YAML summary is the default, hwome is the fallback.
         if eac_keyword in ["EAC4", "EAC5", "EAC6"]:
+            config = Observatory._ingest_from_summary(eac_name=eac_keyword.lower())
+            if config is not None:
+                logger.info(
+                    f"Loaded {eac_keyword} configuration from YAML summary "
+                    f"(EAC_SUMMARY_DIR)"
+                )
+                return config
+            logger.info(
+                f"YAML summary for {eac_keyword} unavailable; " f"falling back to hwome"
+            )
             config = Observatory._ingest_from_hwome(eac_name=eac_keyword.lower())
             logger.info(f"Loaded {eac_keyword} configuration from hwome")
             return config
-        # Use eacy (either for EAC1-3 or as fallback for EAC4-6)
+        # EAC1-3: eacy
         else:
             logger.info(f"Loading {eac_keyword} configuration from eacy")
             config = Observatory._convert_eacy_to_unified_format(eac_keyword)
@@ -454,6 +473,229 @@ class Observatory(ABC):  # abstract class
             unified_config[obs_mode] = mode_config
 
         return unified_config
+
+    @staticmethod
+    def _ingest_from_summary(eac_name="eac5"):
+        """
+        Load configuration from a self-contained YAML summary file.
+
+        The summary file (e.g. ``eac5_summary.yaml``) is produced by hwome but
+        is fully self-contained, so this path reproduces the hwome numbers
+        WITHOUT requiring the (private, non-pip-installable) hwome module. It is
+        the default source for EAC4-6.
+
+        The ``EAC_SUMMARY_DIR`` environment variable must point to a directory that
+        contains ``<eac_name>_summary.yaml``.
+
+        Returns the same unified configuration format as
+        ``_ingest_from_hwome`` / ``_convert_eacy_to_unified_format``, so it is
+        validated by ``validate_engineering_config`` and consumed identically
+        downstream. In particular, per channel:
+
+            optics_throughput = telescope x channel x FULL-filter
+
+        exactly as ``_ingest_from_hwome`` builds it (there,
+        ``prod(tp.v[:-1])`` over all optical stages including the in-wheel
+        filter). The per-channel optics therefore carry EXACTLY ONE filter
+        factor, sourced solely from ``_select_channel_filter``. Today that is
+        the FULL filter; when per-filter selection is implemented, that helper
+        will return the user-selected filter INSTEAD of FULL, so the selected
+        filter replaces FULL -- the two are never multiplied together.
+
+        Behavior:
+
+        - If ``EAC_SUMMARY_DIR`` is unset, or the file does not exist, returns
+          ``None`` so the caller can fall back to hwome.
+        - If the file exists but is malformed / missing required structure,
+          RAISES (fail loud; do not mask corrupt engineering data).
+
+        Parameters
+        ----------
+        eac_name : str, optional
+            Lower-case EAC configuration name (e.g. "eac5"). Default "eac5".
+
+        Returns
+        -------
+        dict or None
+            Unified configuration dictionary, or None if the summary is
+            unavailable (so the caller falls back to hwome).
+        """
+        import yaml
+
+        summary_dir = os.environ.get("EAC_SUMMARY_DIR")
+        if not summary_dir:
+            logger.info("EAC_SUMMARY_DIR is not set; cannot load a YAML summary file.")
+            return None
+
+        path = Path(summary_dir, f"{eac_name}_summary.yaml")
+        if not path.exists():
+            logger.info(f"YAML summary file not found at {path}")
+            return None
+
+        with open(path, "r") as fh:
+            data = yaml.safe_load(fh)
+
+        # --- local helpers -------------------------------------------------
+
+        def _curve(block, name):
+            """Return (wavelength_um, value) sorted-unique arrays from a
+            ``{wavelength: {value, unit}, value}`` block."""
+            try:
+                # wavelengths provided in nanometers
+                wl = (np.asarray(block["wavelength"]["value"], dtype=float) * u.nm).to(
+                    WAVELENGTH
+                )
+                val = np.asarray(block["value"], dtype=float)
+            except (KeyError, TypeError) as e:
+                raise ValueError(
+                    f"[{eac_name}] malformed curve for '{name}' in summary: {e}"
+                )
+            if wl.shape != val.shape or wl.size == 0:
+                raise ValueError(
+                    f"[{eac_name}] curve '{name}' has mismatched/empty "
+                    f"wavelength ({wl.size}) and value ({val.size}) arrays."
+                )
+            order = np.argsort(wl)
+            wl, val = wl[order], val[order]
+            keep = np.concatenate(([True], np.diff(wl) > 0))
+            return wl[keep], val[keep]
+
+        def _scalar(x, name):
+            """Extract a finite, non-negative float from a bare number or a
+            ``{value, unit}`` dict."""
+            v = x["value"] if isinstance(x, dict) else x
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"[{eac_name}] expected a scalar for '{name}', got {x!r}."
+                )
+            if not np.isfinite(v) or v < 0:
+                raise ValueError(
+                    f"[{eac_name}] scalar '{name}' = {v} must be finite and "
+                    f"non-negative."
+                )
+            return v
+
+        def _select_channel_filter(filters_dict, chan_name):
+            """Return the single filter block applied to this channel.
+
+            This is the ONLY source of the filter factor in optics_throughput,
+            and the isolated seam for future per-filter selection. Today it
+            returns the channel's FULL (broadband) filter.
+            """
+            full_keys = [k for k in filters_dict if "FULL" in k]
+            if not full_keys:
+                raise ValueError(
+                    f"[{eac_name}] channel '{chan_name}' has no FULL filter "
+                    f"among {list(filters_dict)}."
+                )
+            return filters_dict[full_keys[0]]
+
+        def _filter_on_grid(fblock, grid, chan_name):
+            """Evaluate the selected filter's in-band transmission on ``grid``
+            (um). The flat-top in-band value is a scalar today but may become a
+            curve; both are handled."""
+            thr = fblock["throughput"]
+            if isinstance(thr, dict):  # wavelength-dependent transmission curve
+                fwl, fval = _curve(thr, f"{chan_name} filter")
+                return np.interp(grid, fwl, fval)
+            return np.full(grid.shape, _scalar(thr, f"{chan_name} filter throughput"))
+
+        # --- physical (telescope-level) parameters -------------------------
+        try:
+            telescope = data["telescope"]
+            config = {
+                "diameter": float(telescope["circumscribing_diameter"]["value"]),  # m
+                "temperature": float(telescope["primary_temperature"]["value"]),  # K
+            }
+            tele_wl, tele_val = _curve(telescope["throughput"], "telescope")
+            channels = data["channels"]
+            detectors = data["detectors"]
+        except (KeyError, TypeError) as e:
+            raise ValueError(
+                f"[{eac_name}] summary file is missing required top-level "
+                f"structure: {e}"
+            )
+
+        # --- per-mode, per-channel ----------------------------------------
+        for obs_mode, suffix in (("IMAGER", "_DI"), ("IFS", "_IFS")):
+            mode_config = {}
+
+            for chan_name, chan in channels.items():
+                # Coronagraph (CI) channels only, matching this observing mode.
+                if chan.get("instrument") != "CI" or not chan_name.endswith(suffix):
+                    continue
+
+                chan_wl, chan_val = _curve(chan["throughput"], f"{chan_name} channel")
+
+                fblock = _select_channel_filter(chan["filters"], chan_name)
+                center = (
+                    _scalar(fblock["center"], f"{chan_name} filter center") * u.nm
+                ).to(WAVELENGTH)
+                width = (
+                    _scalar(fblock["width"], f"{chan_name} filter width") * u.nm
+                ).to(WAVELENGTH)
+                band_lo = center - width / 2.0
+                band_hi = center + width / 2.0
+
+                detector = detectors[chan["detector"]]
+                qe_wl, qe_val = _curve(detector["qe"], f"{chan_name} qe")
+
+                # Restrict to the filter flat-top AND the common coverage of all
+                # curves, so interpolation never extrapolates.
+                lo = max(band_lo, tele_wl.min(), chan_wl.min(), qe_wl.min())
+                hi = min(band_hi, tele_wl.max(), chan_wl.max(), qe_wl.max())
+                if not (lo < hi):
+                    raise ValueError(
+                        f"[{eac_name}] channel '{chan_name}': empty wavelength "
+                        f"overlap between filter band and curve coverage."
+                    )
+
+                # Shared grid: union of native sample points strictly inside (lo, hi).
+                grid = np.unique(np.concatenate([tele_wl, chan_wl, qe_wl]))
+                grid = grid[(grid > lo) & (grid < hi)]
+                if grid.size == 0:
+                    raise ValueError(
+                        f"[{eac_name}] channel '{chan_name}': no sample points "
+                        f"inside the retained band ({lo:.4g}, {hi:.4g}) um."
+                    )
+
+                optics = (
+                    np.interp(grid, tele_wl, tele_val)
+                    * np.interp(grid, chan_wl, chan_val)
+                    * _filter_on_grid(fblock, grid, chan_name)
+                )
+                qe = np.interp(grid, qe_wl, qe_val)
+                dqe = np.full(grid.shape, _scalar(detector["dqe"], f"{chan_name} dqe"))
+
+                # Channel key: "CI_VIS_DI" -> "vis", "CI_Bridge_IFS" -> "bridge".
+                short_name = chan_name[len("CI_") : -len(suffix)].lower()
+
+                mode_config[short_name] = {
+                    "pixscale_mas": (
+                        _scalar(chan["plate_scale"], f"{chan_name} plate_scale")
+                        * ARCSEC
+                    )
+                    .to(MAS)
+                    .value,
+                    "dc": _scalar(
+                        detector["dark_current"], f"{chan_name} dark_current"
+                    ),
+                    "rn": _scalar(detector["read_noise"], f"{chan_name} read_noise"),
+                    "cic": _scalar(detector["cic"], f"{chan_name} cic"),
+                    "wavelength_range": (float(lo.value), float(hi.value)),
+                    "spectral": {
+                        "wavelength": grid,
+                        "optics_throughput": optics,
+                        "qe": qe,
+                        "dqe": dqe,
+                    },
+                }
+
+            config[obs_mode] = mode_config
+
+        return config
 
     @staticmethod
     def _ingest_from_hwome(eac_name="eac5"):
@@ -1176,7 +1418,8 @@ class Observatory(ABC):  # abstract class
 
     def calculate_total_throughput(self) -> None:
         """
-        Calculate the total system throughput.
+        Calculate the total system throughput, i.e. the dimensionless end-to-end
+        efficiency including detector QE and dQE.
 
         This method computes the combined optical and detector throughput by
         multiplying the optics throughput with the detector quantum efficiency (QE),

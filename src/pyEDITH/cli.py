@@ -10,8 +10,12 @@ import logging
 
 logger = logging.getLogger("pyEDITH")
 
-# Declare the environment variable
+# Declare the environment variables
 # os.environ["SCI_ENG_DIR"] = "/path/to/Sci-Eng-Interface/hwo_sci_eng"
+# EAC_SUMMARY_DIR points to a directory of <eac>_summary.yaml files (the default
+# EAC4-6 source; self-contained, does not require hwome). If unset, EAC4-6 fall
+# back to the hwome model.
+# os.environ["EAC_SUMMARY_DIR"] = "/path/to/eac_summaries"
 
 
 def main():

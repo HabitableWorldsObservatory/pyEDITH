@@ -1793,3 +1793,413 @@ def test_observatory_mediator_get_scene_parameter(
     result = mediator.get_scene_parameter("vmag")
 
     assert result == mock_scene.vmag
+
+
+# ============================================================================
+# Tests for Observatory._ingest_from_summary (YAML summary path)
+# ============================================================================
+
+import os
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# Fixture builders
+# ---------------------------------------------------------------------------
+def _curve_block(wl_nm, val):
+    """Build a {wavelength:{value,unit}, value} block (wavelengths in nm)."""
+    return {
+        "wavelength": {"value": list(map(float, wl_nm)), "unit": "nm"},
+        "value": list(map(float, val)),
+    }
+
+
+def _ci_channel(
+    instr,
+    plate,
+    cwl,
+    cval,
+    full_key,
+    center,
+    width,
+    detector_key,
+    *,
+    extra_filters=None,
+):
+    """A CI channel block faithful to the real summary layout."""
+    filters = {
+        full_key: {
+            "center": {"value": center, "unit": "nm"},
+            "width": {"value": width, "unit": "nm"},
+            "edge_width": {"value": 16.0, "unit": "nm"},
+            "floor_trans": 1.0e-10,
+            "throughput": 0.899616,  # scalar flat-top tophat
+        },
+        # A narrow science tophat that must NOT be chosen by _select_channel_filter.
+        "CI_F864": {
+            "center": {"value": 864.0, "unit": "nm"},
+            "width": {"value": 28.0, "unit": "nm"},
+            "edge_width": {"value": 10.0, "unit": "nm"},
+            "floor_trans": 1.0e-10,
+            "throughput": 0.8996,
+        },
+    }
+    if extra_filters:
+        filters.update(extra_filters)
+    return {
+        "instrument": instr,
+        "plate_scale": {"value": plate, "unit": "arcsec / pix"},
+        "throughput": _curve_block(cwl, np.full_like(cwl, cval)),
+        "filters": filters,
+        "detector": detector_key,
+    }
+
+
+def _summary_dict(eac_name="eac5"):
+    """A structurally faithful, minimal summary dict matching the REAL file:
+    channels, per-channel FULL keys, spaced detector keys, Bridge not NIR_IFS."""
+    # Curves deliberately start at 90 nm as in the real file.
+    tele_wl = np.linspace(90.0, 3000.0, 300)
+    vis_wl = np.linspace(90.0, 2500.0, 120)
+    nir_wl = np.linspace(90.0, 2500.0, 120)
+    brg_wl = np.linspace(90.0, 2500.0, 120)
+    qe_wl = np.linspace(90.0, 2500.0, 200)
+
+    DET_VIS = "CI VIS DI EMCCD Si"
+    DET_NIR = "CI NIR IFS HgCdTe LMAPD"
+
+    return {
+        "configuration": eac_name,
+        "telescope": {
+            "circumscribing_diameter": {"value": 10.033, "unit": "m"},
+            "primary_temperature": {"value": 293.0, "unit": "K"},
+            "focal_length": {"value": 170, "unit": "m"},
+            "throughput": _curve_block(tele_wl, np.full_like(tele_wl, 0.85)),
+        },
+        "channels": {
+            "CI_VIS_DI": _ci_channel(
+                "CI", 0.00323065, vis_wl, 0.3, "CI_FULL_VIS", 650.0, 400.0, DET_VIS
+            ),
+            "CI_NIR_DI": _ci_channel(
+                "CI", 0.00505551, nir_wl, 0.25, "CI_FULL_NIR", 1400.0, 600.0, DET_NIR
+            ),
+            "CI_Bridge_DI": _ci_channel(
+                "CI", 0.00508041, brg_wl, 0.2, "CI_FULL_BRIDGE", 975.0, 250.0, DET_NIR
+            ),
+            "CI_VIS_IFS": _ci_channel(
+                "CI", 0.000305532, vis_wl, 0.3, "CI_FULL_VIS", 650.0, 400.0, DET_VIS
+            ),
+            "CI_Bridge_IFS": _ci_channel(
+                "CI", 0.0012165, brg_wl, 0.2, "CI_FULL_BRIDGE", 975.0, 250.0, DET_NIR
+            ),
+            # Non-CI channel: must be ignored by the reader.
+            "HRI_A_VIS": _ci_channel(
+                "HRI_A", 0.00531, vis_wl, 0.3, "CI_FULL_VIS", 650.0, 400.0, DET_VIS
+            ),
+        },
+        "detectors": {
+            DET_VIS: {
+                "read_noise": {"value": 0.0, "unit": "ct / pix"},
+                "dark_current": {"value": 3e-5, "unit": "ct / (pix s)"},
+                "pixel_pitch": {"value": 6.5e-6, "unit": "m"},
+                "qe": _curve_block(qe_wl, np.full_like(qe_wl, 0.9)),
+                "cic": 0.0,  # bare scalar form
+                "dqe": 0.75,
+            },
+            DET_NIR: {
+                "read_noise": {"value": 0.3, "unit": "ct / pix"},
+                "dark_current": {"value": 0.002, "unit": "ct / (pix s)"},
+                "pixel_pitch": {"value": 1e-5, "unit": "m"},
+                "qe": _curve_block(qe_wl, np.full_like(qe_wl, 0.92)),
+                "cic": {"value": 0.001, "unit": "ct / pix"},  # {value, unit} form
+                "dqe": 0.75,
+            },
+        },
+    }
+
+
+def _write_summary(dirpath, eac_name="eac5", mutate=None):
+    """Serialise the faithful summary dict to <eac>_summary.yaml.
+
+    ``mutate`` is an optional callable(dict)->dict applied before writing,
+    used by the negative-path tests to inject specific corruptions.
+    """
+    import yaml
+
+    data = _summary_dict(eac_name)
+    if mutate is not None:
+        data = mutate(data) or data
+    path = Path(dirpath, f"{eac_name}_summary.yaml")
+    with open(path, "w") as fh:
+        yaml.safe_dump(data, fh)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Happy-path: faithful fixture
+# ---------------------------------------------------------------------------
+def test_ingest_from_summary_builds_valid_unified_config(tmp_path, monkeypatch):
+    _write_summary(tmp_path)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+
+    cfg = Observatory._ingest_from_summary("eac5")
+    Observatory.validate_engineering_config(cfg, "EAC5")
+
+    assert cfg["diameter"] == pytest.approx(10.033)
+    assert cfg["temperature"] == pytest.approx(293.0)
+
+    # CI *_DI -> IMAGER ; CI *_IFS -> IFS. Non-CI dropped.
+    # The real file has vis/nir/bridge imagers and vis/bridge IFS (NO nir IFS).
+    assert set(cfg["IMAGER"]) == {"vis", "nir", "bridge"}
+    assert set(cfg["IFS"]) == {"vis", "bridge"}
+
+    vis = cfg["IMAGER"]["vis"]
+    # FULL_VIS flat-top is 650 +/- 200 nm -> 0.45..0.85 um (curves cover it).
+    assert vis["wavelength_range"] == pytest.approx((0.45, 0.85))
+    assert vis["pixscale_mas"] == pytest.approx(0.00323065 * 1e3)
+
+    # cic: scalar form on VIS detector, {value,unit} form on NIR detector.
+    assert vis["cic"] == pytest.approx(0.0)
+    assert cfg["IMAGER"]["nir"]["cic"] == pytest.approx(0.001)
+    assert cfg["IMAGER"]["bridge"]["cic"] == pytest.approx(0.001)  # shares NIR det
+
+    spec = vis["spectral"]
+    n = len(spec["wavelength"])
+    assert n == len(spec["qe"]) == len(spec["optics_throughput"]) == len(spec["dqe"])
+    assert np.all(np.diff(spec["wavelength"]) > 0)  # strictly increasing um grid
+    # optics = telescope x channel x FULL-filter (EXACTLY one filter factor).
+    assert np.allclose(spec["optics_throughput"], 0.85 * 0.3 * 0.899616)
+    assert np.allclose(spec["qe"], 0.9)
+    assert np.allclose(spec["dqe"], 0.75)
+
+
+def test_ingest_from_summary_bridge_channel_naming(tmp_path, monkeypatch):
+    _write_summary(tmp_path)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+
+    cfg = Observatory._ingest_from_summary("eac5")
+    assert "bridge" in cfg["IFS"]
+    assert "bridge" in cfg["IMAGER"]
+    # FULL_BRIDGE band 975 +/- 125 nm -> 0.85..1.1 um.
+    assert cfg["IFS"]["bridge"]["wavelength_range"] == pytest.approx((0.85, 1.1))
+
+
+def test_ingest_from_summary_scalar_accepts_bare_and_dict_forms(tmp_path, monkeypatch):
+    def mutate(data):
+        # Force the UNtested _scalar input shape (flip dict<->bare).
+        det = data["detectors"]["CI VIS DI EMCCD Si"]
+        det["dark_current"] = 3e-5  # bare, if your fixture used {value,unit}
+        det["read_noise"] = {"value": 0.0, "unit": "ct / pix"}  # dict form
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    cfg = Observatory._ingest_from_summary("eac5")
+    assert cfg["IMAGER"]["vis"]["dc"] == pytest.approx(3e-5)
+
+
+def test_ingest_from_summary_filter_throughput_as_curve(tmp_path, monkeypatch):
+    # Filter transmission linearly ramps 0.5 -> 1.0 across the VIS band.
+    fwl = [450.0, 650.0, 850.0]  # nm, inside FULL_VIS flat-top
+    fval = [0.5, 0.75, 1.0]
+
+    def mutate(data):
+        full = data["channels"]["CI_VIS_DI"]["filters"]["CI_FULL_VIS"]
+        full["throughput"] = _curve_block(fwl, fval)
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+
+    cfg = Observatory._ingest_from_summary("eac5")
+    spec = cfg["IMAGER"]["vis"]["spectral"]
+    grid_um = np.asarray(spec["wavelength"])
+    # Reconstruct expected filter curve on the grid (interp in um).
+    exp_filter = np.interp(grid_um, np.asarray(fwl) * 1e-3, fval)
+    assert np.allclose(spec["optics_throughput"], 0.85 * 0.3 * exp_filter)
+    # Must vary across the band -> proves the curve branch actually ran.
+    assert spec["optics_throughput"].min() < spec["optics_throughput"].max()
+
+
+def test_ingest_from_summary_raises_on_empty_band_overlap(tmp_path, monkeypatch):
+    def mutate(data):
+        full = data["channels"]["CI_VIS_DI"]["filters"]["CI_FULL_VIS"]
+        full["center"] = {"value": 9000.0, "unit": "nm"}  # far beyond 2500 nm curves
+        full["width"] = {"value": 100.0, "unit": "nm"}
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="empty wavelength overlap"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_ingest_from_summary_raises_on_empty_grid(tmp_path, monkeypatch):
+    import yaml
+
+    # Build a channel whose curves are coarse and whose FULL band is a sliver
+    # positioned strictly between two adjacent sample points.
+    data = _summary_dict()
+    # Coarse curves with a known gap between 650 and 660 nm.
+    coarse = _curve_block([90.0, 650.0, 660.0, 2500.0], [0.3, 0.3, 0.3, 0.3])
+    data["channels"]["CI_VIS_DI"]["throughput"] = coarse
+    data["telescope"]["throughput"] = _curve_block(
+        [90.0, 650.0, 660.0, 2500.0], [0.85, 0.85, 0.85, 0.85]
+    )
+    data["detectors"]["CI VIS DI EMCCD Si"]["qe"] = _curve_block(
+        [90.0, 650.0, 660.0, 2500.0], [0.9, 0.9, 0.9, 0.9]
+    )
+    full = data["channels"]["CI_VIS_DI"]["filters"]["CI_FULL_VIS"]
+    full["center"] = {"value": 655.0, "unit": "nm"}  # band 654..656, between samples
+    full["width"] = {"value": 2.0, "unit": "nm"}
+
+    path = Path(tmp_path, "eac5_summary.yaml")
+    with open(path, "w") as fh:
+        yaml.safe_dump(data, fh)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+
+    with pytest.raises(ValueError, match="no sample points"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_ingest_from_summary_raises_when_no_full_filter(tmp_path, monkeypatch):
+    def mutate(data):
+        # Strip the FULL filter from the VIS channel.
+        data["channels"]["CI_VIS_DI"]["filters"].pop("CI_FULL_VIS")
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="no FULL filter"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_ingest_from_summary_raises_on_mismatched_curve_lengths(tmp_path, monkeypatch):
+    def mutate(data):
+        data["telescope"]["throughput"] = {
+            "wavelength": {"value": [300.0, 400.0, 500.0], "unit": "nm"},
+            "value": [0.85, 0.85],  # one short
+        }
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="mismatched/empty"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_ingest_from_summary_raises_on_malformed_curve_block(tmp_path, monkeypatch):
+    def mutate(data):
+        data["telescope"]["throughput"] = {"value": [0.85, 0.85]}  # no 'wavelength'
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="malformed curve"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_ingest_from_summary_raises_on_negative_scalar(tmp_path, monkeypatch):
+    def mutate(data):
+        data["detectors"]["CI VIS DI EMCCD Si"]["read_noise"] = {
+            "value": -1.0,
+            "unit": "ct / pix",
+        }
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="must be finite and"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_ingest_from_summary_raises_on_non_numeric_scalar(tmp_path, monkeypatch):
+    def mutate(data):
+        data["channels"]["CI_VIS_DI"]["plate_scale"] = {
+            "value": "not-a-number",
+            "unit": "arcsec / pix",
+        }
+        return data
+
+
+def test_ingest_from_summary_returns_none_when_file_missing(tmp_path, monkeypatch):
+    # Guarantee a real, empty directory with NO summary file of this name.
+    empty = tmp_path / "definitely_empty"
+    empty.mkdir()
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(empty))
+    assert not (empty / "eac5_summary.yaml").exists()  # prove the premise
+    assert Observatory._ingest_from_summary("eac5") is None
+
+
+def test_ingest_from_summary_raises_on_missing_top_level_structure(
+    tmp_path, monkeypatch
+):
+    def mutate(data):
+        del data["telescope"]["circumscribing_diameter"]  # KeyError inside the try
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="missing required top-level structure"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_load_eac_configuration_prefers_summary(monkeypatch):
+    """EAC5: summary returns a config -> taken directly, hwome NOT called (line 341 True)."""
+    sentinel = {"from": "summary"}
+    monkeypatch.setattr(
+        Observatory,
+        "_ingest_from_summary",
+        staticmethod(lambda eac_name="eac5": sentinel),
+    )
+
+    def _boom(*a, **k):
+        raise AssertionError("hwome must not be called when summary succeeds")
+
+    monkeypatch.setattr(Observatory, "_ingest_from_hwome", staticmethod(_boom))
+
+    assert Observatory._load_eac_configuration("EAC5") is sentinel
+
+
+def test_load_eac_configuration_falls_back_to_hwome(monkeypatch):
+    """EAC5: summary returns None -> hwome fallback branch (lines ~342-346)."""
+    monkeypatch.setattr(
+        Observatory, "_ingest_from_summary", staticmethod(lambda eac_name="eac5": None)
+    )
+    sentinel = {"from": "hwome"}
+    monkeypatch.setattr(
+        Observatory,
+        "_ingest_from_hwome",
+        staticmethod(lambda eac_name="eac5": sentinel),
+    )
+    assert Observatory._load_eac_configuration("EAC5") is sentinel
+
+
+def test_scalar_raises_valueerror_on_non_numeric_string(tmp_path, monkeypatch):
+    def mutate(data):
+        # dqe is a plain scalar consumed for every CI channel; corrupt it.
+        data["detectors"]["CI VIS DI EMCCD Si"]["dqe"] = "not-a-number"
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="expected a scalar"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_scalar_raises_typeerror_on_wrong_type(tmp_path, monkeypatch):
+    def mutate(data):
+        data["detectors"]["CI VIS DI EMCCD Si"]["dqe"] = [
+            1,
+            2,
+            3,
+        ]  # float([...]) -> TypeError
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="expected a scalar"):
+        Observatory._ingest_from_summary("eac5")
