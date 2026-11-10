@@ -227,9 +227,9 @@ def _make_fake_hwome_system():
 def _fake_search_configuration(channel_type, wavelength_range_nm, center_nm):
     if channel_type == "cg_di":
         return {
-            "vis": {
-                "vis_FULL": {
-                    "path": "CI.CI_VIS_IFS.CI_4F874",
+            "CI_VIS_DI": {
+                "CI_FULL_VIS": {
+                    "path": "CI.CI_VIS_DI.CI_4F874",
                     "center": 0.5 * u.um,
                     "width": 0.1 * u.um,
                 }
@@ -990,9 +990,9 @@ def test_ingest_from_hwome_builds_unified_config(monkeypatch):
     assert n == 3  # only wavelengths strictly inside (0.45, 0.55) survive the mask
 
     # sanity: threading of mask_name / chan_name into the API calls
-    fake_system.resolve.assert_called_once_with("CI.vis")
+    fake_system.resolve.assert_called_once_with("CI.CI_VIS_DI")
     fake_system.system.OpticalPath.select.assert_any_call(
-        Instrument="CI", Channel="CI_VIS_IFS", Filter="CI_4F874", Mask="baseline_mask"
+        Instrument="CI", Channel="CI_VIS_DI", Filter="CI_4F874", Mask="baseline_mask"
     )
 
 

@@ -802,7 +802,7 @@ class Observatory(ABC):  # abstract class
         hwo_configuration["temperature"] = float(np.median(optical_path.temperature.v))
 
         # Load configuration for each observation type
-        for observation_type in ["IMAGER", "IFS"]:
+        for observation_type, suffix in (("IMAGER", "_DI"), ("IFS", "_IFS")):
             configuration_by_obs = {}
             obs_type = "di" if observation_type == "IMAGER" else "ifs"
 
@@ -870,7 +870,8 @@ class Observatory(ABC):  # abstract class
                 # Retrieve scalar parameters for this channel
                 nav_chan = system.resolve("CI." + chan_name)
 
-                configuration_by_obs[chan_name] = {
+                short_name = chan_name[len("CI_") : -len(suffix)].lower()
+                configuration_by_obs[short_name] = {
                     "pixscale_mas": float(
                         (
                             _scalar_from_hwome(
