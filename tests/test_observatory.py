@@ -922,38 +922,9 @@ def test_convert_eacy_calls_load_detector_once_per_mode(monkeypatch):
     eacy_mod.load_instrument.assert_called_once_with("CI")
 
 
-def test_load_eac_configuration_dispatches_to_eacy_for_eac1(monkeypatch):
-    """EAC1 must route through eacy (the else branch), NOT hwome."""
-    eacy_mod = install_fake_eacy(monkeypatch)
-
-    config = Observatory._load_eac_configuration("EAC1")
-
-    assert config["diameter"] == pytest.approx(6.0)
-    eacy_mod.load_telescope.assert_called_once_with("EAC1")
-
-
-def test_load_eac_configuration_dispatches_to_eacy_for_eac3(monkeypatch):
-    """EAC2/EAC3 also route through eacy (they're not in the hwome list)."""
-    eacy_mod = install_fake_eacy(monkeypatch)
-
-    Observatory._load_eac_configuration("EAC3")
-
-    eacy_mod.load_telescope.assert_called_once_with("EAC3")
-
-
 # ============================================================================
 # Tests for Observatory._ingest_from_hwome
 # ============================================================================
-
-
-def test_load_eac_configuration_dispatches_to_hwome_for_eac5(monkeypatch):
-    fake_system = _make_fake_hwome_system()
-    install_fake_hwome(monkeypatch, fake_system, _fake_search_configuration)
-
-    config = Observatory._load_eac_configuration("EAC5")
-
-    assert config["diameter"] == pytest.approx(6.0)
-    fake_system.load_configuration.assert_called_once_with("eac5.yaml")
 
 
 def test_ingest_from_hwome_builds_unified_config(monkeypatch):
@@ -1796,6 +1767,131 @@ def test_observatory_mediator_get_scene_parameter(
 
 
 # ============================================================================
+# Tests for Observatory.load_eac_configuration
+# ============================================================================
+from pyEDITH.observatory import EACDataAccessError
+
+
+def test_load_eac_configuration_invalid_keyword_raises_value_error():
+    """Unsupported or malformed EAC keywords must fail fast with a ValueError."""
+    invalid_keywords = ["EAC7", "FOO", "eac_99", "", "  "]
+    for kw in invalid_keywords:
+        with pytest.raises(ValueError, match="Unsupported EAC keyword"):
+            Observatory._load_eac_configuration(kw)
+
+
+def test_load_eac_configuration_normalizes_case_and_whitespace(monkeypatch):
+    """Keywords with leading/trailing whitespace or lower case must resolve correctly."""
+    sentinel = {"from": "eacy"}
+    mock_convert = MagicMock(return_value=sentinel)
+    monkeypatch.setattr(Observatory, "_convert_eacy_to_unified_format", mock_convert)
+
+    # Test lowercase and untrimmed inputs
+    result = Observatory._load_eac_configuration("  eac1 \t")
+
+    assert result == sentinel
+    mock_convert.assert_called_once_with("EAC1")
+
+
+def test_load_eac_configuration_dispatches_to_eacy_for_eac1_3(monkeypatch):
+    """EAC1-3 route through eacy conversion without touching hwome."""
+    sentinel = {"diameter": 6.0}
+    mock_convert = MagicMock(return_value=sentinel)
+    monkeypatch.setattr(Observatory, "_convert_eacy_to_unified_format", mock_convert)
+
+    for kw in ["EAC1", "EAC2", "EAC3"]:
+        config = Observatory._load_eac_configuration(kw)
+        assert config["diameter"] == pytest.approx(6.0)
+
+    assert mock_convert.call_count == 3
+
+
+def test_load_eac_configuration_prefers_summary(monkeypatch):
+    """EAC5 summary hit skips hwome import and ingestion entirely."""
+    sentinel = {"from": "summary"}
+    monkeypatch.setattr(
+        Observatory,
+        "_ingest_from_summary",
+        staticmethod(lambda eac_name: sentinel if eac_name == "eac5" else None),
+    )
+
+    def _boom(*args, **kwargs):
+        raise AssertionError(
+            "hwome ingestion path must not be executed when summary exists"
+        )
+
+    monkeypatch.setattr(Observatory, "_ingest_from_hwome", staticmethod(_boom))
+
+    # Ensures that even if hwome is missing from environment, summary path succeeds
+    monkeypatch.setitem(sys.modules, "hwome", None)
+
+    assert Observatory._load_eac_configuration("EAC5") is sentinel
+
+
+def test_load_eac_configuration_falls_back_to_hwome(monkeypatch):
+    """EAC5 falls back to live hwome when summary is unavailable (None)."""
+    # 1. Summary returns None
+    monkeypatch.setattr(
+        Observatory, "_ingest_from_summary", staticmethod(lambda eac_name: None)
+    )
+
+    # 2. Mock hwome package import
+    fake_hwome = MagicMock()
+    monkeypatch.setitem(sys.modules, "hwome", fake_hwome)
+
+    # 3. Ingest from hwome returns expected dict
+    sentinel = {"from": "hwome"}
+    monkeypatch.setattr(
+        Observatory,
+        "_ingest_from_hwome",
+        staticmethod(lambda eac_name: sentinel if eac_name == "eac5" else None),
+    )
+
+    assert Observatory._load_eac_configuration("EAC5") is sentinel
+
+
+def test_load_eac_configuration_raises_eac_data_access_error_when_hwome_missing(
+    monkeypatch,
+):
+    """EAC4-6 without summary or hwome package raises EACDataAccessError."""
+    monkeypatch.setattr(
+        Observatory, "_ingest_from_summary", staticmethod(lambda eac_name: None)
+    )
+
+    # Force hwome import to raise ModuleNotFoundError
+    monkeypatch.delitem(sys.modules, "hwome", raising=False)
+
+    # Block import machinery from finding real hwome if installed locally
+    def raise_module_not_found(name, *args, **kwargs):
+        if name == "hwome":
+            raise ModuleNotFoundError("No module named 'hwome'")
+        return __import__(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", raise_module_not_found)
+
+    with pytest.raises(EACDataAccessError, match="not included in this public build"):
+        Observatory._load_eac_configuration("EAC5")
+
+
+def test_load_eac_configuration_propagates_internal_hwome_runtime_errors(monkeypatch):
+    """Execution errors inside _ingest_from_hwome must propagate natively, not as access errors."""
+    monkeypatch.setattr(
+        Observatory, "_ingest_from_summary", staticmethod(lambda eac_name: None)
+    )
+    monkeypatch.setitem(sys.modules, "hwome", MagicMock())
+
+    def _internal_failure(eac_name):
+        raise KeyError("Missing required file in hwome model")
+
+    monkeypatch.setattr(
+        Observatory, "_ingest_from_hwome", staticmethod(_internal_failure)
+    )
+
+    with pytest.raises(KeyError, match="Missing required file"):
+        Observatory._load_eac_configuration("EAC5")
+
+
+# ============================================================================
 # Tests for Observatory._ingest_from_summary (YAML summary path)
 # ============================================================================
 
@@ -2204,54 +2300,6 @@ def test_ingest_from_summary_raises_on_missing_top_level_structure(
     monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
     with pytest.raises(ValueError, match="missing required top-level structure"):
         Observatory._ingest_from_summary("eac5")
-
-
-def test_load_eac_configuration_prefers_summary(monkeypatch):
-    """EAC5: summary returns a config -> taken directly, hwome NOT called."""
-    sentinel = {"from": "summary"}
-    monkeypatch.setattr(
-        Observatory,
-        "_ingest_from_summary",
-        staticmethod(lambda eac_name="eac5": sentinel),
-    )
-
-    def _boom(*a, **k):
-        raise AssertionError("hwome must not be called when summary succeeds")
-
-    monkeypatch.setattr(Observatory, "_ingest_from_hwome", staticmethod(_boom))
-
-    assert Observatory._load_eac_configuration("EAC5") is sentinel
-
-
-def test_load_eac_configuration_falls_back_to_hwome(monkeypatch):
-    """EAC5: summary returns None -> hwome fallback branch."""
-    monkeypatch.setattr(
-        Observatory, "_ingest_from_summary", staticmethod(lambda eac_name="eac5": None)
-    )
-    sentinel = {"from": "hwome"}
-    monkeypatch.setattr(
-        Observatory,
-        "_ingest_from_hwome",
-        staticmethod(lambda eac_name="eac5": sentinel),
-    )
-    assert Observatory._load_eac_configuration("EAC5") is sentinel
-
-
-def test_load_eac_configuration_clean_error_when_neither_available(monkeypatch):
-    """EAC5 with no summary and no hwome -> a helpful ImportError, not a raw
-    ModuleNotFoundError. THIS TEST FAILS until the try/except guard is added to
-    _load_eac_configuration (that is the single real code change of the PR)."""
-    monkeypatch.setattr(
-        Observatory, "_ingest_from_summary", staticmethod(lambda eac_name="eac5": None)
-    )
-
-    def _no_hwome(*a, **k):
-        raise ImportError("No module named 'hwome'")
-
-    monkeypatch.setattr(Observatory, "_ingest_from_hwome", staticmethod(_no_hwome))
-
-    with pytest.raises(ImportError, match="not yet publicly released"):
-        Observatory._load_eac_configuration("EAC5")
 
 
 def test_scalar_raises_valueerror_on_non_numeric_string(tmp_path, monkeypatch):

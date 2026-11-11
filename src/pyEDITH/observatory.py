@@ -14,6 +14,17 @@ from pyEDITH import detectors, parse_input, telescopes
 
 logger = logging.getLogger("pyEDITH")
 
+EAC_LEGACY = {"EAC1", "EAC2", "EAC3"}
+EAC_PROPRIETARY = {"EAC4", "EAC5", "EAC6"}
+SUPPORTED_EACS = EAC_LEGACY | EAC_PROPRIETARY
+
+
+class EACDataAccessError(Exception):
+    """Raised when proprietary EAC engineering data is inaccessible."""
+
+    pass
+
+
 # Effective QE due to degradation, cosmic ray effects, and readout
 # inefficiencies. Not yet tracked by eacy or hwome engineering data;
 # this is a placeholder until real per-channel values are available.
@@ -307,64 +318,62 @@ class Observatory(ABC):  # abstract class
             )
 
     @staticmethod
-    def _load_eac_configuration(eac_keyword):
+    def _load_eac_configuration(eac_keyword: str) -> dict:
         """
-        Load EAC configuration from one of three sources, in a unified format.
-
-        This is the single source of truth for EAC configuration loading, and it
-        returns the same unified configuration dictionary regardless of source:
-
-        - EAC4-6: the YAML summary file (produced by hwome, see
-          ``_ingest_from_summary``) is the default. It is self-contained and does
-          NOT require hwome to be installed. If the summary is unavailable (the
-          ``EAC_SUMMARY_DIR`` environment variable is unset, or the file is
-          missing), it falls back to the live hwome model (``_ingest_from_hwome``).
-        - EAC1-3: eacy (``_convert_eacy_to_unified_format``).
-
-        A summary file that is present but malformed is NOT silently skipped;
-        ``_ingest_from_summary`` raises in that case rather than masking corrupt
-        engineering data behind the hwome fallback.
+        Load EAC configuration from eacy, YAML summary, or live hwome model.
 
         Parameters
         ----------
         eac_keyword : str
-            EAC configuration name (e.g., "EAC1", "EAC5", "EAC6")
+            EAC configuration identifier (e.g., "EAC1", "EAC5", "TOYMODEL").
 
         Returns
         -------
         dict
-            Unified configuration dictionary in hwome-like format, or None if loading fails
+            Validated unified configuration dictionary.
         """
-        # For EAC4-6: YAML summary is the default, hwome is the fallback.
-        if eac_keyword in ["EAC4", "EAC5", "EAC6"]:
-            config = Observatory._ingest_from_summary(eac_name=eac_keyword.lower())
+        normalized_key = eac_keyword.strip().upper()
+
+        if normalized_key not in SUPPORTED_EACS:
+            raise ValueError(
+                f"Unsupported EAC keyword '{eac_keyword}'. "
+                f"Must be one of {sorted(list(SUPPORTED_EACS))}."
+            )
+
+        # Route EAC4-6 (Proprietary / High-Fidelity Engineering Models)
+        if normalized_key in EAC_PROPRIETARY:
+            eac_name_lower = normalized_key.lower()
+
+            # Step 1: Try local/environment YAML summary
+            config = Observatory._ingest_from_summary(eac_name=eac_name_lower)
             if config is not None:
                 logger.info(
-                    f"Loaded {eac_keyword} configuration from YAML summary "
-                    f"(EAC_SUMMARY_DIR)"
+                    f"Loaded {normalized_key} from YAML summary (EAC_SUMMARY_DIR)"
                 )
                 return config
+
+            # Step 2: Fall back to live hwome package
             logger.info(
-                f"YAML summary for {eac_keyword} unavailable; " f"falling back to hwome"
+                f"YAML summary for {normalized_key} unavailable; attempting hwome import"
             )
             try:
-                config = Observatory._ingest_from_hwome(eac_name=eac_keyword.lower())
-            except ImportError as e:
-                raise ImportError(
-                    f"{eac_keyword} requires either a YAML summary file "
-                    f"(set EAC_SUMMARY_DIR to a directory containing "
-                    f"'{eac_keyword.lower()}_summary.yaml') or the 'hwome' package, "
-                    f"neither of which is available. These engineering data are not "
-                    f"yet publicly released. ToyModel and EAC1-3 are fully supported "
-                    f"without additional packages."
+                import hwome
+            except ModuleNotFoundError as e:
+                raise EACDataAccessError(
+                    f"{normalized_key} engineering data is proprietary and not included in this public build. "
+                    f"To enable {normalized_key}, set EAC_SUMMARY_DIR to a directory containing "
+                    f"'{eac_name_lower}_summary.yaml' or install the internal 'hwome' package. "
+                    f"EAC1-3 and ToyModel remain fully accessible."
                 ) from e
-            logger.info(f"Loaded {eac_keyword} configuration from hwome")
+
+            # Allow native hwome execution errors to propagate normally if hwome is installed
+            config = Observatory._ingest_from_hwome(eac_name=eac_name_lower)
             return config
-        # EAC1-3: eacy
-        else:
-            logger.info(f"Loading {eac_keyword} configuration from eacy")
-            config = Observatory._convert_eacy_to_unified_format(eac_keyword)
-            return config
+
+        # Route EAC1-3 (Public Baseline)
+        logger.info(f"Loading {normalized_key} baseline configuration from eacy")
+        config = Observatory._convert_eacy_to_unified_format(normalized_key)
+        return config
 
     @staticmethod
     def _convert_eacy_to_unified_format(eac_keyword):
