@@ -20,13 +20,27 @@ author = "Alei, Eleonora & Currie, Miles et al."
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
 extensions = [
-    "sphinx.ext.autodoc",
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
+    "sphinx.ext.mathjax",
     "nbsphinx",
+    "autoapi.extension",
     "myst_parser",
+    "sphinx_design",
 ]
 
+autoapi_dirs = ["../../src/pyEDITH"]  # Path to your source folder
+autoapi_type = "python"
+
+# Replicate your current options globally
+autoapi_options = [
+    "members",
+    "undoc-members",
+    "show-inheritance",
+]
+autoapi_member_order = "bysource"
+# Suppress noisy static analysis import warnings from AutoAPI
+suppress_warnings = ["autoapi.python_import_resolution", "ref.python"]
 
 source_suffix = {
     ".rst": "restructuredtext",
@@ -41,6 +55,8 @@ nbsphinx_allow_errors = False  # Fail if notebooks have errors in outputs
 # MyST settings
 myst_enable_extensions = [
     "colon_fence",
+    "dollarmath",
+    "amsmath",
 ]
 myst_heading_anchors = 3
 
@@ -95,7 +111,12 @@ def setup(app):
     tutorials_src = source_dir / "../../tutorials"
 
     # Copy specific notebooks directly to source folder
-    notebooks_to_copy = ["imaging_tutorial.ipynb", "spectroscopy_tutorial.ipynb"]
+    notebooks_to_copy = [
+        "imaging_tutorial.ipynb",
+        "spectroscopy_tutorial.ipynb",
+        "exoearth_spectroscopy_tutorial.ipynb",
+        "imaging_early-vs-modern_Venus.ipynb",
+    ]
 
     for notebook in notebooks_to_copy:
         src = tutorials_src / notebook

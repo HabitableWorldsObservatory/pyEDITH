@@ -1,5 +1,7 @@
 sphinx
+sphinx-design
 sphinx_book_theme
+sphinx-autoapi
 nbsphinx
 ipython
 pandoc
