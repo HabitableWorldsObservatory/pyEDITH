@@ -611,16 +611,6 @@ class Observatory(ABC):  # abstract class
                 )
             return filters_dict[full_keys[0]]
 
-        def _filter_on_grid(fblock, grid, chan_name):
-            """Evaluate the selected filter's in-band transmission on ``grid``
-            (um). The flat-top in-band value is a scalar today but may become a
-            curve; both are handled."""
-            thr = fblock["throughput"]
-            if isinstance(thr, dict):  # wavelength-dependent transmission curve
-                fwl, fval = _curve(thr, f"{chan_name} filter")
-                return np.interp(grid, fwl, fval)
-            return np.full(grid.shape, _scalar(thr, f"{chan_name} filter throughput"))
-
         # --- physical (telescope-level) parameters -------------------------
         try:
             telescope = data["telescope"]
@@ -649,22 +639,38 @@ class Observatory(ABC):  # abstract class
                 chan_wl, chan_val = _curve(chan["throughput"], f"{chan_name} channel")
 
                 fblock = _select_channel_filter(chan["filters"], chan_name)
+                filter_wl, filter_val = _curve(fblock["throughput"], "filter")
+
+                mask_wl, mask_val = _curve(
+                    chan["masks"]["throughput"], f"{chan_name} mask"
+                )
+
                 center = (
-                    _scalar(fblock["center"], f"{chan_name} filter center") * u.nm
+                    _scalar(fblock["center"], f"{chan_name} filter center")
+                    * u.Unit(fblock["center"]["unit"])
                 ).to(WAVELENGTH)
                 width = (
-                    _scalar(fblock["width"], f"{chan_name} filter width") * u.nm
+                    _scalar(fblock["width"], f"{chan_name} filter width")
+                    * u.Unit(fblock["width"]["unit"])
                 ).to(WAVELENGTH)
-                band_lo = center - width / 2.0
-                band_hi = center + width / 2.0
+                band_min = (
+                    _scalar(chan["band_min"], f"{chan_name} band min ")
+                    * u.Unit(chan["band_min"]["unit"])
+                ).to(WAVELENGTH)
+                band_max = (
+                    _scalar(chan["band_max"], f"{chan_name} band max ")
+                    * u.Unit(chan["band_max"]["unit"])
+                ).to(WAVELENGTH)
+                lower_edge = np.maximum(center - width / 2, band_min)
+                higher_edge = np.minimum(center + width / 2, band_max)
 
                 detector = detectors[chan["detector"]]
                 qe_wl, qe_val = _curve(detector["qe"], f"{chan_name} qe")
 
                 # Restrict to the filter flat-top AND the common coverage of all
                 # curves, so interpolation never extrapolates.
-                lo = max(band_lo, tele_wl.min(), chan_wl.min(), qe_wl.min())
-                hi = min(band_hi, tele_wl.max(), chan_wl.max(), qe_wl.max())
+                lo = max(lower_edge, tele_wl.min(), chan_wl.min(), qe_wl.min())
+                hi = min(higher_edge, tele_wl.max(), chan_wl.max(), qe_wl.max())
                 if not (lo < hi):
                     raise ValueError(
                         f"[{eac_name}] channel '{chan_name}': empty wavelength "
@@ -683,8 +689,10 @@ class Observatory(ABC):  # abstract class
                 optics = (
                     np.interp(grid, tele_wl, tele_val)
                     * np.interp(grid, chan_wl, chan_val)
-                    * _filter_on_grid(fblock, grid, chan_name)
+                    * np.interp(grid, mask_wl, mask_val)
+                    * np.interp(grid, filter_wl, filter_val)
                 )
+
                 qe = np.interp(grid, qe_wl, qe_val)
                 dqe = np.full(grid.shape, _scalar(detector["dqe"], f"{chan_name} dqe"))
 
@@ -804,8 +812,8 @@ class Observatory(ABC):  # abstract class
         nav = (
             system.system.Mask
         )  # generic - we could iterate all the masks, but we only need one since they don't have real values (throughput 0.99)
-        mask_name = next(iter(nav.name.values())).value
-
+        mask_name = [s.value for s in nav.name.values() if eac_name.upper() in s.value]
+        mask_name = [mask_name[0], mask_name[-1]]
         hwo_configuration = {}
 
         # Physical parameters (telescope-level)
@@ -856,7 +864,9 @@ class Observatory(ABC):  # abstract class
                     Mask=mask_name,
                 )
 
-                tp = optical_path.throughput(include_detector=True)
+                tp = optical_path.throughput(
+                    include_detector=True, include_contamination=True
+                )
 
                 # Separate optical throughput from detector QE
                 optical_throughput = np.prod(

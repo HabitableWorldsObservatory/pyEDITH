@@ -178,13 +178,22 @@ def _masked_scalar(value, masked=False, fill_value=1e20):
     return ma.masked_array(value, mask=masked, fill_value=fill_value)
 
 
-def _make_fake_hwome_system():
+def _make_fake_hwome_system(eac5_mask_names=("EAC5_mask_1", "EAC5_mask_2")):
+    """Build a mock hwome Analyzer system with configurable EAC5 mask names."""
     system = MagicMock()
     system.load_configuration = MagicMock(return_value=None)
 
-    mask_obj = MagicMock()
-    mask_obj.value = "baseline_mask"
-    system.system.Mask.name = {"only_mask": mask_obj}
+    # Include an unrelated mask alongside the EAC5 masks to verify filtering.
+    other_mask = MagicMock()
+    other_mask.value = "baseline_mask"
+    mask_entries = {"other": other_mask}
+
+    for idx, name in enumerate(eac5_mask_names, start=1):
+        m = MagicMock()
+        m.value = name
+        mask_entries[f"mask{idx}"] = m
+
+    system.system.Mask.name = mask_entries
 
     system.system.Telescope.circumscribing_diameter.q = 6.0 * u.m
 
@@ -960,10 +969,31 @@ def test_ingest_from_hwome_builds_unified_config(monkeypatch):
     )
     assert n == 2  # only wavelengths strictly inside (0.4, 0.5) survive the mask
 
-    # sanity: threading of mask_name / chan_name into the API calls
+    # sanity: threading of [first, last] EAC5 masks and chan_name into API calls
     fake_system.resolve.assert_called_once_with("CI.CI_VIS_DI")
     fake_system.system.OpticalPath.select.assert_any_call(
-        Instrument="CI", Channel="CI_VIS_DI", Filter="CI_F456", Mask="baseline_mask"
+        Instrument="CI",
+        Channel="CI_VIS_DI",
+        Filter="CI_F456",
+        Mask=["EAC5_mask_1", "EAC5_mask_2"],
+    )
+
+
+def test_ingest_from_hwome_selects_first_and_last_eac5_masks(monkeypatch):
+    """When multiple EAC5 masks are present, only the first and last matching
+    masks are passed to OpticalPath.select (ignoring middle and non-EAC5 masks)."""
+    fake_system = _make_fake_hwome_system(
+        eac5_mask_names=("EAC5_first", "EAC5_middle", "EAC5_last")
+    )
+    install_fake_hwome(monkeypatch, fake_system, _fake_search_configuration)
+
+    Observatory._ingest_from_hwome(eac_name="eac5")
+
+    fake_system.system.OpticalPath.select.assert_any_call(
+        Instrument="CI",
+        Channel="CI_VIS_DI",
+        Filter="CI_F456",
+        Mask=["EAC5_first", "EAC5_last"],
     )
 
 
@@ -977,8 +1007,6 @@ def test_ingest_from_hwome_masked_scalar_is_unmasked_to_float(monkeypatch):
     must survive as its plain numeric value.
     """
     fake_system = _make_fake_hwome_system()
-    # hwome hands us dc as a masked single-element array. We do not control this
-    # representation; float() must extract the underlying value regardless of mask.
     fake_system.resolve.return_value.Detector.dark_current.v = _masked_scalar(
         1.0e-05, masked=True
     )
@@ -1018,9 +1046,8 @@ def test_scalar_from_hwome_never_returns_fill_value(monkeypatch):
 
 def test_ingest_from_hwome_non_finite_scalar_raises(monkeypatch):
     """A finite-typed but NaN-valued hwome scalar trips _scalar_from_hwome's
-    finiteness guard (line 530->531), failing loudly rather than propagating NaN."""
+    finiteness guard, failing loudly rather than propagating NaN."""
     fake_system = _make_fake_hwome_system()
-    # A single-element (passes size guard) but NaN-valued (fails finiteness guard)
     fake_system.resolve.return_value.Detector.dark_current.v = _masked_scalar(
         np.nan, masked=False
     )
@@ -1895,7 +1922,6 @@ def test_load_eac_configuration_propagates_internal_hwome_runtime_errors(monkeyp
 # Tests for Observatory._ingest_from_summary (YAML summary path)
 # ============================================================================
 
-import os
 from pathlib import Path
 
 import numpy as np
@@ -1924,6 +1950,9 @@ def _ci_channel(
     detector_key,
     *,
     full_throughput=0.91,
+    mask_throughput=0.95,
+    band_min=100.0,
+    band_max=2500.0,
     extra_filters=None,
 ):
     """A CI channel block faithful to the real summary layout.
@@ -1934,7 +1963,7 @@ def _ci_channel(
             "width": {"value": width, "unit": "nm"},
             "edge_width": {"value": 14.0, "unit": "nm"},
             "floor_trans": 2e-10,
-            "throughput": full_throughput,  # scalar flat-top tophat
+            "throughput": _curve_block(cwl, np.full_like(cwl, full_throughput)),
         },
         # A narrow science tophat that must NOT be chosen by _select_channel_filter.
         "CI_F676": {
@@ -1942,7 +1971,7 @@ def _ci_channel(
             "width": {"value": 30.0, "unit": "nm"},
             "edge_width": {"value": 16.0, "unit": "nm"},
             "floor_trans": 2e-10,
-            "throughput": 0.82,
+            "throughput": _curve_block(cwl, np.full_like(cwl, 0.82)),
         },
     }
     if extra_filters:
@@ -1950,7 +1979,12 @@ def _ci_channel(
     return {
         "instrument": instr,
         "plate_scale": {"value": plate, "unit": "arcsec / pix"},
+        "band_min": {"value": band_min, "unit": "nm"},
+        "band_max": {"value": band_max, "unit": "nm"},
         "throughput": _curve_block(cwl, np.full_like(cwl, cval)),
+        "masks": {
+            "throughput": _curve_block(cwl, np.full_like(cwl, mask_throughput)),
+        },
         "filters": filters,
         "detector": detector_key,
     }
@@ -1988,6 +2022,7 @@ def _summary_dict(eac_name="eac5"):
                 440.0,
                 DET_VIS,
                 full_throughput=0.91,
+                mask_throughput=0.95,
             ),
             "CI_NIR_DI": _ci_channel(
                 "CI",
@@ -1999,6 +2034,7 @@ def _summary_dict(eac_name="eac5"):
                 550.0,
                 DET_NIR,
                 full_throughput=0.905,
+                mask_throughput=0.95,
             ),
             "CI_Bridge_DI": _ci_channel(
                 "CI",
@@ -2010,6 +2046,7 @@ def _summary_dict(eac_name="eac5"):
                 300.0,
                 DET_NIR,
                 full_throughput=0.88,
+                mask_throughput=0.95,
             ),
             "CI_VIS_IFS": _ci_channel(
                 "CI",
@@ -2021,6 +2058,7 @@ def _summary_dict(eac_name="eac5"):
                 440.0,
                 DET_VIS,
                 full_throughput=0.91,
+                mask_throughput=0.95,
             ),
             "CI_Bridge_IFS": _ci_channel(
                 "CI",
@@ -2032,6 +2070,7 @@ def _summary_dict(eac_name="eac5"):
                 300.0,
                 DET_NIR,
                 full_throughput=0.88,
+                mask_throughput=0.95,
             ),
             # Non-CI channel: must be ignored by the reader.
             "HRI_A_VIS": _ci_channel(
@@ -2044,6 +2083,7 @@ def _summary_dict(eac_name="eac5"):
                 440.0,
                 DET_VIS,
                 full_throughput=0.91,
+                mask_throughput=0.95,
             ),
         },
         "detectors": {
@@ -2101,7 +2141,7 @@ def test_ingest_from_summary_builds_valid_unified_config(tmp_path, monkeypatch):
     assert set(cfg["IFS"]) == {"vis", "bridge"}
 
     vis = cfg["IMAGER"]["vis"]
-    # FULL_VIS flat-top is 600 +/- 220 nm -> 0.38..0.82 um.
+    # FULL_VIS flat-top is 600 +/- 220 nm -> 0.38..0.82 um (within band_min/max).
     assert vis["wavelength_range"] == pytest.approx((0.38, 0.82))
     assert vis["pixscale_mas"] == pytest.approx(0.003546 * 1e3)
 
@@ -2113,8 +2153,8 @@ def test_ingest_from_summary_builds_valid_unified_config(tmp_path, monkeypatch):
     n = len(spec["wavelength"])
     assert n == len(spec["qe"]) == len(spec["optics_throughput"]) == len(spec["dqe"])
     assert np.all(np.diff(spec["wavelength"]) > 0)
-    # optics = telescope(0.88) x channel(0.35) x FULL(0.91).
-    assert np.allclose(spec["optics_throughput"], 0.88 * 0.35 * 0.91)
+    # optics = telescope(0.88) x channel(0.35) x mask(0.95) x FULL(0.91).
+    assert np.allclose(spec["optics_throughput"], 0.88 * 0.35 * 0.95 * 0.91)
     assert np.allclose(spec["qe"], 0.93)
     assert np.allclose(spec["dqe"], 0.75)
 
@@ -2129,11 +2169,30 @@ def test_ingest_from_summary_bridge_channel_naming(tmp_path, monkeypatch):
     assert cfg["IFS"]["bridge"]["wavelength_range"] == pytest.approx((0.85, 1.15))
 
 
+def test_ingest_from_summary_clamps_to_band_min_and_band_max(tmp_path, monkeypatch):
+    def mutate(data):
+        # FULL_VIS spans 380..820 nm; clamp it tighter with band_min/band_max.
+        vis = data["channels"]["CI_VIS_DI"]
+        vis["band_min"] = {"value": 450.0, "unit": "nm"}
+        vis["band_max"] = {"value": 750.0, "unit": "nm"}
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+
+    cfg = Observatory._ingest_from_summary("eac5")
+    vis = cfg["IMAGER"]["vis"]
+    assert vis["wavelength_range"] == pytest.approx((0.45, 0.75))
+    wl = vis["spectral"]["wavelength"]
+    assert wl.min().value > 0.45
+    assert wl.max().value < 0.75
+
+
 def test_ingest_from_summary_scalar_accepts_bare_and_dict_forms(tmp_path, monkeypatch):
     def mutate(data):
         # Force the UNtested _scalar input shape (flip dict<->bare).
         det = data["detectors"]["DET_A"]
-        det["dark_current"] = 3e-5  # bare, if your fixture used {value,unit}
+        det["dark_current"] = {"value": 3e-5, "unit": "ct / (pix s)"}  # dict form
         det["read_noise"] = {"value": 0.0, "unit": "ct / pix"}  # dict form
         return data
 
@@ -2145,7 +2204,7 @@ def test_ingest_from_summary_scalar_accepts_bare_and_dict_forms(tmp_path, monkey
 
 def test_ingest_from_summary_filter_throughput_as_curve(tmp_path, monkeypatch):
     # Filter transmission linearly ramps 0.5 -> 1.0 across the VIS band.
-    fwl = [420.0, 600.0, 800.0]  # nm, inside FULL_VIS flat-top (380..820)
+    fwl = [350.0, 600.0, 850.0]  # nm, spans FULL_VIS flat-top (380..820)
     fval = [0.5, 0.75, 1.0]
 
     def mutate(data):
@@ -2161,12 +2220,36 @@ def test_ingest_from_summary_filter_throughput_as_curve(tmp_path, monkeypatch):
     grid_um = np.asarray(spec["wavelength"])
     # Reconstruct expected filter curve on the grid (interp in um).
     exp_filter = np.interp(grid_um, np.asarray(fwl) * 1e-3, fval)
-    # optics = telescope(0.88) x channel(0.35) x filter-curve.
-    assert np.allclose(spec["optics_throughput"], 0.88 * 0.35 * exp_filter)
+    # optics = telescope(0.88) x channel(0.35) x mask(0.95) x filter-curve.
+    assert np.allclose(spec["optics_throughput"], 0.88 * 0.35 * 0.95 * exp_filter)
     # Must vary across the band -> proves the curve branch actually ran.
     assert spec["optics_throughput"].min() < spec["optics_throughput"].max()
 
 
+def test_ingest_from_summary_mask_throughput_as_curve(tmp_path, monkeypatch):
+    # Mask transmission ramps 0.6 -> 0.9 across the VIS band.
+    mwl = [350.0, 600.0, 850.0]
+    mval = [0.6, 0.75, 0.9]
+
+    def mutate(data):
+        data["channels"]["CI_VIS_DI"]["masks"]["throughput"] = _curve_block(mwl, mval)
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+
+    cfg = Observatory._ingest_from_summary("eac5")
+    spec = cfg["IMAGER"]["vis"]["spectral"]
+    grid_um = np.asarray(spec["wavelength"])
+    exp_mask = np.interp(grid_um, np.asarray(mwl) * 1e-3, mval)
+    # optics = telescope(0.88) x channel(0.35) x mask-curve x FULL(0.91).
+    assert np.allclose(spec["optics_throughput"], 0.88 * 0.35 * exp_mask * 0.91)
+    assert spec["optics_throughput"].min() < spec["optics_throughput"].max()
+
+
+# ---------------------------------------------------------------------------
+# Negative-path: validation & error handling
+# ---------------------------------------------------------------------------
 def test_ingest_from_summary_raises_on_empty_band_overlap(tmp_path, monkeypatch):
     def mutate(data):
         full = data["channels"]["CI_VIS_DI"]["filters"]["CI_FULL_VIS"]
@@ -2186,7 +2269,6 @@ def test_ingest_from_summary_raises_on_empty_grid(tmp_path, monkeypatch):
     # Build a channel whose curves are coarse and whose FULL band is a sliver
     # positioned strictly between two adjacent sample points.
     data = _summary_dict()
-    # Coarse curves with a known gap between 650 and 660 nm.
     coarse = _curve_block([90.0, 650.0, 660.0, 2500.0], [0.35, 0.35, 0.35, 0.35])
     data["channels"]["CI_VIS_DI"]["throughput"] = coarse
     data["telescope"]["throughput"] = _curve_block(
@@ -2245,6 +2327,17 @@ def test_ingest_from_summary_raises_on_malformed_curve_block(tmp_path, monkeypat
         Observatory._ingest_from_summary("eac5")
 
 
+def test_ingest_from_summary_raises_on_malformed_mask_curve(tmp_path, monkeypatch):
+    def mutate(data):
+        data["channels"]["CI_VIS_DI"]["masks"]["throughput"] = {"value": [0.95]}
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="malformed curve"):
+        Observatory._ingest_from_summary("eac5")
+
+
 def test_ingest_from_summary_raises_on_negative_scalar(tmp_path, monkeypatch):
     def mutate(data):
         data["detectors"]["DET_A"]["read_noise"] = {
@@ -2267,7 +2360,6 @@ def test_ingest_from_summary_raises_on_non_numeric_scalar(tmp_path, monkeypatch)
         }
         return data
 
-    # FIX: this test previously had no body after `mutate`, so it passed vacuously.
     _write_summary(tmp_path, mutate=mutate)
     monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
     with pytest.raises(ValueError, match="expected a scalar"):
@@ -2275,17 +2367,15 @@ def test_ingest_from_summary_raises_on_non_numeric_scalar(tmp_path, monkeypatch)
 
 
 def test_ingest_from_summary_returns_none_when_dir_unset(monkeypatch):
-    # NEW: covers the `if not summary_dir: return None` branch (fresh-clone path).
     monkeypatch.delenv("EAC_SUMMARY_DIR", raising=False)
     assert Observatory._ingest_from_summary("eac5") is None
 
 
 def test_ingest_from_summary_returns_none_when_file_missing(tmp_path, monkeypatch):
-    # Guarantee a real, empty directory with NO summary file of this name.
     empty = tmp_path / "definitely_empty"
     empty.mkdir()
     monkeypatch.setenv("EAC_SUMMARY_DIR", str(empty))
-    assert not (empty / "eac5_summary.yaml").exists()  # prove the premise
+    assert not (empty / "eac5_summary.yaml").exists()
     assert Observatory._ingest_from_summary("eac5") is None
 
 
@@ -2304,7 +2394,6 @@ def test_ingest_from_summary_raises_on_missing_top_level_structure(
 
 def test_scalar_raises_valueerror_on_non_numeric_string(tmp_path, monkeypatch):
     def mutate(data):
-        # dqe is a plain scalar consumed for every CI channel; corrupt it.
         data["detectors"]["DET_A"]["dqe"] = "not-a-number"
         return data
 
@@ -2316,11 +2405,7 @@ def test_scalar_raises_valueerror_on_non_numeric_string(tmp_path, monkeypatch):
 
 def test_scalar_raises_typeerror_on_wrong_type(tmp_path, monkeypatch):
     def mutate(data):
-        data["detectors"]["DET_A"]["dqe"] = [
-            1,
-            2,
-            3,
-        ]  # float([...]) -> TypeError
+        data["detectors"]["DET_A"]["dqe"] = [1, 2, 3]  # float([...]) -> TypeError
         return data
 
     _write_summary(tmp_path, mutate=mutate)
