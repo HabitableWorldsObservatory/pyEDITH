@@ -73,6 +73,34 @@ def test_filter_invalid_type():
         Filter("bad", center=0.5 * u.um, bandwidth=0.1, resolution=100, type="INVALID")
 
 
+def test_ifs_without_resolution_demotes_to_imager(caplog):
+    """IFS with no resolution cannot build a grid; it is demoted to broadband."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
+        f = Filter("f", low=0.5 * u.um, high=0.6 * u.um, resolution=None, type="IFS")
+
+    assert f.type == "IMAGER"  # mutated
+    assert len(f.wavelength) == 1  # broadband
+    assert f.delta_wavelength is None
+    assert any("requires a resolution" in r.message for r in caplog.records)
+
+
+def test_imager_with_resolution_warns_but_ignores(caplog):
+    """IMAGER with a resolution set: the value is meaningless and ignored, with a warning."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
+        f = Filter(
+            "f", center=0.55 * u.um, bandwidth=0.2, resolution=140, type="IMAGER"
+        )
+
+    assert f.type == "IMAGER"
+    assert len(f.wavelength) == 1  # still broadband
+    assert f.delta_wavelength is None  # resolution had no effect
+    assert any("ignores the supplied" in r.message for r in caplog.records)
+
+
 def test_wavelength_coverage():
     """Test that wavelength array covers the filter bounds."""
     f = Filter("test", low=1.0 * u.um, high=1.5 * u.um, resolution=50)

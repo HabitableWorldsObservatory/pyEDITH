@@ -99,9 +99,7 @@ def mock_observatory():
     observatory.telescope.unobscured_area = 0.879
     observatory.telescope.toverhead_fixed = 8381.3 * u.s
     observatory.telescope.toverhead_multi = 1.1 * DIMENSIONLESS
-    observatory.telescope.telescope_optical_throughput = u.Quantity(
-        [0.823], DIMENSIONLESS
-    )
+
     observatory.telescope.temperature = 290.0 * u.K
     observatory.telescope.T_contamination = 0.95 * DIMENSIONLESS
     observatory.telescope.Area = 42.75906827 * u.m**2
@@ -132,9 +130,7 @@ def mock_observatory():
     observatory.coronagraph.Tcore = 0.2968371 * DIMENSIONLESS
     observatory.coronagraph.TLyot = 0.65 * DIMENSIONLESS
     observatory.coronagraph.nrolls = 2
-    observatory.coronagraph.coronagraph_optical_throughput = u.Quantity(
-        [0.44], DIMENSIONLESS
-    )
+
     observatory.coronagraph.coronagraph_spectral_resolution = 1.0 * DIMENSIONLESS
     observatory.coronagraph.npsfratios = 1
     observatory.coronagraph.npix = 4

@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-import os
+import types, sys, copy
 from unittest.mock import patch, MagicMock
 from astropy import units as u
 from pathlib import Path
@@ -38,6 +38,22 @@ from pyEDITH.units import (
 from pyEDITH.filters import Filter
 from yippy import Coronagraph as yippycoro
 
+
+# Reset presets just in case a test changes them.
+@pytest.fixture(autouse=True)
+def _restore_observatory_class_state():
+    """Snapshot and restore Observatory's mutable class-level dicts around every
+    test, so a test that accidentally mutates PRESETS / TOY_MODEL_COMPONENTS
+    cannot leak that mutation into subsequent tests (an order-dependent Heisenbug)."""
+    saved_presets = copy.deepcopy(Observatory.PRESETS)
+    saved_toy = copy.deepcopy(Observatory.TOY_MODEL_COMPONENTS)
+    try:
+        yield
+    finally:
+        Observatory.PRESETS = saved_presets
+        Observatory.TOY_MODEL_COMPONENTS = saved_toy
+
+
 # ============================================================================
 # Mock Helper Functions
 # ============================================================================
@@ -55,9 +71,6 @@ def create_mock_telescope():
     # Overhead times
     mock_tel.toverhead_fixed = 8381.3 * TIME
     mock_tel.toverhead_multi = 1.1 * DIMENSIONLESS
-
-    # Optical properties (nlambda=1 for IMAGER mode)
-    mock_tel.telescope_optical_throughput = np.array([0.823]) * DIMENSIONLESS
 
     # Thermal properties
     mock_tel.temperature = 290.0 * TEMPERATURE
@@ -107,7 +120,6 @@ def create_mock_coronagraph():
     mock_coro.npsfratios = 1
 
     # Coronagraph optical properties
-    mock_coro.coronagraph_optical_throughput = np.array([0.44]) * DIMENSIONLESS
     mock_coro.coronagraph_spectral_resolution = 1.0 * DIMENSIONLESS
 
     # Parameters
@@ -158,6 +170,162 @@ def create_mock_coronagraph():
     return mock_coro
 
 
+import numpy.ma as ma
+
+
+def _masked_scalar(value, masked=False, fill_value=1e20):
+    """Mimic hwome's `.v` accessor: masked_array(data=value, mask=masked, fill_value=fill_value)."""
+    return ma.masked_array(value, mask=masked, fill_value=fill_value)
+
+
+def _make_fake_hwome_system(eac5_mask_names=("EAC5_mask_1", "EAC5_mask_2")):
+    """Build a mock hwome Analyzer system with configurable EAC5 mask names."""
+    system = MagicMock()
+    system.load_configuration = MagicMock(return_value=None)
+
+    # Include an unrelated mask alongside the EAC5 masks to verify filtering.
+    other_mask = MagicMock()
+    other_mask.value = "baseline_mask"
+    mask_entries = {"other": other_mask}
+
+    for idx, name in enumerate(eac5_mask_names, start=1):
+        m = MagicMock()
+        m.value = name
+        mask_entries[f"mask{idx}"] = m
+
+    system.system.Mask.name = mask_entries
+
+    system.system.Telescope.circumscribing_diameter.q = 6.0 * u.m
+
+    optical_path = MagicMock()
+
+    # temperature.v -> masked array (median must work over this)
+    optical_path.temperature.v = ma.masked_array(
+        [290.0, 290.0, 290.0], mask=[False, False, False], fill_value=1e20
+    )
+
+    tp = MagicMock()
+    tp.v = ma.masked_array(
+        [
+            [0.90, 0.90, 0.90, 0.90, 0.90, 0.90, 0.90, 0.90],
+            [0.80, 0.80, 0.80, 0.80, 0.80, 0.80, 0.80, 0.80],
+            [0.95, 0.95, 0.95, 0.95, 0.95, 0.95, 0.95, 0.95],
+        ],
+        mask=False,
+        fill_value=1e20,
+    )
+    tp.w = np.array([0.40, 0.45, 0.48, 0.50, 0.52, 0.55, 0.60, 0.70]) * u.um
+    optical_path.throughput = MagicMock(return_value=tp)
+
+    optical_path.Channel.band_min.q = 0.40 * u.um
+    optical_path.Channel.band_max.q = 0.70 * u.um
+
+    system.system.OpticalPath.select = MagicMock(return_value=optical_path)
+
+    nav_chan = MagicMock()
+    nav_chan.Detector.pixel_pitch.v = _masked_scalar(13.0e-6)
+    nav_chan.focal_length.v = _masked_scalar(20.0)
+    nav_chan.Detector.dark_current.v = _masked_scalar(1.0e-05)
+    nav_chan.Detector.read_noise.v = _masked_scalar(0.1)
+    nav_chan.Detector.cic.v = _masked_scalar(1.3e-3)
+    system.resolve = MagicMock(return_value=nav_chan)
+
+    return system
+
+
+def _fake_search_configuration(channel_type, wavelength_range_nm, center_nm):
+    if channel_type == "cg_di":
+        return {
+            "CI_VIS_DI": {
+                "CI_FULL_VIS": {
+                    "path": "CI.CI_VIS_DI.CI_F456",
+                    "center": 0.45 * u.um,
+                    "width": 0.1 * u.um,
+                }
+            }
+        }
+    # No IFS channels defined in this fake dataset
+    return {}
+
+
+def install_fake_hwome(monkeypatch, system_instance, search_configuration_fn):
+    """Install fake hwome.roam.analyzer.Analyzer / hwome.core.navigator.search_configuration
+    into sys.modules so the local imports inside _ingest_from_hwome succeed."""
+
+    hwome_mod = types.ModuleType("hwome")
+    roam_mod = types.ModuleType("hwome.roam")
+    roam_analyzer_mod = types.ModuleType("hwome.roam.analyzer")
+    core_mod = types.ModuleType("hwome.core")
+    core_navigator_mod = types.ModuleType("hwome.core.navigator")
+
+    hwome_mod.roam = roam_mod
+    hwome_mod.core = core_mod
+    roam_mod.analyzer = roam_analyzer_mod
+    core_mod.navigator = core_navigator_mod
+
+    roam_analyzer_mod.Analyzer = MagicMock(return_value=system_instance)
+    core_navigator_mod.search_configuration = MagicMock(
+        side_effect=search_configuration_fn
+    )
+
+    for name, mod in [
+        ("hwome", hwome_mod),
+        ("hwome.roam", roam_mod),
+        ("hwome.roam.analyzer", roam_analyzer_mod),
+        ("hwome.core", core_mod),
+        ("hwome.core.navigator", core_navigator_mod),
+    ]:
+        monkeypatch.setitem(sys.modules, name, mod)
+
+
+def _eacy_ns(**attrs):
+    """eacy's load_* return objects whose .__dict__ carries the data;
+    SimpleNamespace reproduces that faithfully."""
+    return types.SimpleNamespace(**attrs)
+
+
+def install_fake_eacy(monkeypatch, load_detector_fn=None):
+    """Install a fake `eacy` module so _convert_eacy_to_unified_format runs
+    with no real package or data files.
+
+    Shared wavelength grid: vis finite for the first 3 samples, nir for the
+    last 3, NaN elsewhere, so the finite-qe intersection cleanly splits the
+    two channels into distinct 3-point domains.
+    """
+    shared_lam = np.array([0.40, 0.50, 0.60, 0.90, 1.20, 1.50]) * u.um
+    n = shared_lam.size
+
+    def load_telescope(keyword):
+        return _eacy_ns(
+            diam_circ=6.0,
+            lam=shared_lam,
+            total_tele_refl=np.full(n, 0.90),
+        )
+
+    def load_instrument(name):
+        # source hardcodes "CI"
+        return _eacy_ns(total_inst_refl=np.full(n, 0.80))
+
+    def default_load_detector(obs_mode):
+        return _eacy_ns(
+            qe_vis=np.array([0.90, 0.90, 0.90, np.nan, np.nan, np.nan]),
+            qe_nir=np.array([np.nan, np.nan, np.nan, 0.80, 0.80, 0.80]),
+            dc_vis=1.0e-5,
+            dc_nir=2.0e-5,
+            rn_vis=0.10,
+            rn_nir=0.20,
+        )
+
+    eacy_mod = types.ModuleType("eacy")
+    eacy_mod.load_telescope = MagicMock(side_effect=load_telescope)
+    eacy_mod.load_instrument = MagicMock(side_effect=load_instrument)
+    eacy_mod.load_detector = MagicMock(
+        side_effect=load_detector_fn or default_load_detector
+    )
+    monkeypatch.setitem(sys.modules, "eacy", eacy_mod)
+    return eacy_mod
+
+
 # ============================================================================
 # Fixtures
 # ============================================================================
@@ -170,6 +338,7 @@ def mock_observatory():
     obs.telescope = create_mock_telescope()
     obs.detector = create_mock_detector()
     obs.coronagraph = create_mock_coronagraph()
+    obs.configuration = None
     return obs
 
 
@@ -326,43 +495,55 @@ def test_create_observatory_toymodel_preset():
     assert obs.telescope is not None
     assert obs.coronagraph is not None
     assert obs.detector is not None
+    assert obs.configuration is None
     assert isinstance(obs.telescope, ToyModelTelescope)
     assert isinstance(obs.coronagraph, ToyModelCoronagraph)
     assert isinstance(obs.detector, ToyModelDetector)
 
 
-def test_create_observatory_eac1_preset():
-    """Test creating observatory with EAC1 preset."""
+@patch("pyEDITH.observatory.Observatory.validate_engineering_config")
+@patch("pyEDITH.observatory.Observatory._load_eac_configuration")
+@patch("pyEDITH.observatory.Observatory._create_detector")
+@patch("pyEDITH.observatory.Observatory._create_coronagraph")
+@patch("pyEDITH.observatory.Observatory._create_telescope")
+def test_create_observatory_eac1_preset(
+    mock_tel, mock_coro, mock_det, mock_load, mock_validate
+):
+    """EAC1 preset: verify the correct keywords are dispatched to each factory,
+    and that EAC config loading + validation are invoked. No real eacy/network."""
+    mock_load.return_value = {"sentinel": "eac1_config"}
 
     obs = Observatory()
     obs.create_observatory("EAC1")
 
-    assert hasattr(obs, "telescope")
-    assert hasattr(obs, "coronagraph")
-    assert hasattr(obs, "detector")
-    assert obs.telescope is not None
-    assert obs.coronagraph is not None
-    assert obs.detector is not None
-    assert isinstance(obs.telescope, EACTelescope)
-    assert isinstance(obs.coronagraph, CoronagraphYIP)
-    assert isinstance(obs.detector, EACDetector)
+    mock_tel.assert_called_once_with("EAC1")
+    mock_coro.assert_called_once_with("eac1_aavc_2d")
+    mock_det.assert_called_once_with("EAC1")
+    mock_load.assert_called_once_with("EAC1")
+    mock_validate.assert_called_once_with({"sentinel": "eac1_config"}, "EAC1")
+    assert obs.configuration == {"sentinel": "eac1_config"}
 
 
-def test_create_observatory_eac5_preset():
-    """Test creating observatory with EAC5 preset."""
+@patch("pyEDITH.observatory.Observatory.validate_engineering_config")
+@patch("pyEDITH.observatory.Observatory._load_eac_configuration")
+@patch("pyEDITH.observatory.Observatory._create_detector")
+@patch("pyEDITH.observatory.Observatory._create_coronagraph")
+@patch("pyEDITH.observatory.Observatory._create_telescope")
+def test_create_observatory_eac5_preset(
+    mock_tel, mock_coro, mock_det, mock_load, mock_validate
+):
+    """EAC5 preset: same as EAC1 but with EAC5 keywords."""
+    mock_load.return_value = {"sentinel": "eac5_config"}
 
     obs = Observatory()
     obs.create_observatory("EAC5")
 
-    assert hasattr(obs, "telescope")
-    assert hasattr(obs, "coronagraph")
-    assert hasattr(obs, "detector")
-    assert obs.telescope is not None
-    assert obs.coronagraph is not None
-    assert obs.detector is not None
-    assert isinstance(obs.telescope, EACTelescope)
-    assert isinstance(obs.coronagraph, CoronagraphYIP)
-    assert isinstance(obs.detector, EACDetector)
+    mock_tel.assert_called_once_with("EAC5")
+    mock_coro.assert_called_once_with("eac1_aavc_2d")
+    mock_det.assert_called_once_with("EAC5")
+    mock_load.assert_called_once_with("EAC5")
+    mock_validate.assert_called_once_with({"sentinel": "eac5_config"}, "EAC5")
+    assert obs.configuration == {"sentinel": "eac5_config"}
 
 
 def test_create_observatory_invalid_preset():
@@ -449,11 +630,12 @@ def test_create_telescope_toymodel():
     assert telescope is not None
 
 
-def test_create_telescope_eac():
-    """Test creating EAC telescope."""
-    telescope = Observatory._create_telescope("EAC1")
-    assert telescope is not None
-    assert isinstance(telescope, EACTelescope)
+@patch("pyEDITH.observatory.telescopes.EACTelescope")
+def test_create_telescope_eac(mock_eac_telescope):
+    """EAC telescope: verify EACTelescope is constructed with the keyword."""
+    result = Observatory._create_telescope("EAC1")
+    mock_eac_telescope.assert_called_once_with(keyword="EAC1")
+    assert result is mock_eac_telescope.return_value
 
 
 def test_create_telescope_invalid_keyword():
@@ -478,12 +660,12 @@ def test_create_detector_toymodel():
     assert isinstance(detector, ToyModelDetector)
 
 
-def test_create_detector_eac():
-    """Test creating EAC detector."""
-    detector = Observatory._create_detector("EAC1")
-
-    assert detector is not None
-    assert isinstance(detector, EACDetector)
+@patch("pyEDITH.observatory.detectors.EACDetector")
+def test_create_detector_eac(mock_eac_detector):
+    """EAC detector: verify EACDetector is constructed with the keyword."""
+    result = Observatory._create_detector("EAC1")
+    mock_eac_detector.assert_called_once_with(keyword="EAC1")
+    assert result is mock_eac_detector.return_value
 
 
 def test_create_detector_invalid_keyword():
@@ -630,43 +812,631 @@ def test_create_coronagraph_error_provides_solutions(
 
 
 # ============================================================================
+# Tests for Observatory._select_active_channel
+# ============================================================================
+
+
+def test_select_active_channel_single_match():
+    """Test that the one channel fully containing the wavelength range is selected."""
+    mode_config = {
+        "vis": {"wavelength_range": (0.4, 0.6)},
+        "nir": {"wavelength_range": (0.9, 1.8)},
+    }
+    wavelength_range = u.Quantity([0.45, 0.55], u.micron)
+
+    result = Observatory._select_active_channel(mode_config, wavelength_range)
+
+    assert result == "vis"
+
+
+def test_select_active_channel_no_match_raises():
+    """Test that ValueError is raised when no channel fully contains the range."""
+    mode_config = {
+        "vis": {"wavelength_range": (0.4, 0.6)},
+        "nir": {"wavelength_range": (0.9, 1.8)},
+    }
+    wavelength_range = u.Quantity([0.7, 0.8], u.micron)
+
+    with pytest.raises(ValueError, match="does not fall entirely within"):
+        Observatory._select_active_channel(mode_config, wavelength_range)
+
+
+def test_select_active_channel_multiple_matches_raises():
+    """Test that ValueError is raised when more than one channel contains the range."""
+    mode_config = {
+        "a": {"wavelength_range": (0.4, 1.0)},
+        "b": {"wavelength_range": (0.3, 1.2)},
+    }
+    wavelength_range = u.Quantity([0.45, 0.55], u.micron)
+
+    with pytest.raises(ValueError, match="spans multiple"):
+        Observatory._select_active_channel(mode_config, wavelength_range)
+
+
+# ============================================================================
+# Tests for Observatory._convert_eacy_to_unified_format
+# ============================================================================
+
+
+def test_convert_eacy_builds_both_modes_and_channels(monkeypatch):
+    """Happy path: both modes, both channels, split by finite-qe masking."""
+    install_fake_eacy(monkeypatch)
+
+    config = Observatory._convert_eacy_to_unified_format("EAC1")
+
+    assert config["diameter"] == pytest.approx(6.0)
+    assert config["temperature"] == pytest.approx(290.0)  # eacy hardcoded default
+
+    for mode in ("IMAGER", "IFS"):
+        assert set(config[mode].keys()) == {"vis", "nir"}
+
+        vis = config[mode]["vis"]
+        assert vis["dc"] == pytest.approx(1.0e-5)
+        assert vis["rn"] == pytest.approx(0.10)
+        assert vis["cic"] == 0.0  # eacy cic always 0.0
+        assert vis["pixscale_mas"] > 0
+
+        # combined throughput = 0.90 * 0.80 = 0.72 on the surviving samples
+        assert np.allclose(vis["spectral"]["optics_throughput"], 0.72)
+        # DEFAULT_DQE broadcast
+        assert np.allclose(vis["spectral"]["dqe"], 0.75)
+
+        # only the 3 finite-qe samples survive
+        assert len(vis["spectral"]["wavelength"]) == 3
+        assert len(vis["spectral"]["qe"]) == 3
+        lo, hi = vis["wavelength_range"]
+        assert lo == pytest.approx(0.40)
+        assert hi == pytest.approx(0.60)
+
+        nir = config[mode]["nir"]
+        assert nir["dc"] == pytest.approx(2.0e-5)
+        assert len(nir["spectral"]["wavelength"]) == 3
+        assert nir["wavelength_range"][0] == pytest.approx(0.90)
+        assert nir["wavelength_range"][1] == pytest.approx(1.50)
+
+
+def test_convert_eacy_no_intersection_raises(monkeypatch):
+    """The 'Could not determine distinct ... domain' guard fires when a channel's
+    qe is never finite where throughput is finite."""
+
+    def bad_detector(obs_mode):
+        return _eacy_ns(
+            qe_vis=np.full(6, np.nan),  # never finite -> empty mask
+            qe_nir=np.array([np.nan, np.nan, np.nan, 0.8, 0.8, 0.8]),
+            dc_vis=1e-5,
+            dc_nir=2e-5,
+            rn_vis=0.1,
+            rn_nir=0.2,
+        )
+
+    install_fake_eacy(monkeypatch, load_detector_fn=bad_detector)
+
+    with pytest.raises(ValueError, match="Could not determine distinct vis"):
+        Observatory._convert_eacy_to_unified_format("EAC1")
+
+
+def test_convert_eacy_calls_load_detector_once_per_mode(monkeypatch):
+    """The source states load_detector is called once per mode (QE differs by
+    mode). Verify that contract, since it's a documented design intent."""
+    eacy_mod = install_fake_eacy(monkeypatch)
+
+    Observatory._convert_eacy_to_unified_format("EAC1")
+
+    # Called exactly twice: once for IMAGER, once for IFS
+    assert eacy_mod.load_detector.call_count == 2
+    modes_requested = {c.args[0] for c in eacy_mod.load_detector.call_args_list}
+    assert modes_requested == {"IMAGER", "IFS"}
+    # telescope/instrument consulted once each (mode-independent)
+    eacy_mod.load_telescope.assert_called_once_with("EAC1")
+    eacy_mod.load_instrument.assert_called_once_with("CI")
+
+
+# ============================================================================
+# Tests for Observatory._ingest_from_hwome
+# ============================================================================
+
+
+def test_ingest_from_hwome_builds_unified_config(monkeypatch):
+    fake_system = _make_fake_hwome_system()
+    install_fake_hwome(monkeypatch, fake_system, _fake_search_configuration)
+
+    result = Observatory._ingest_from_hwome(eac_name="eac5")
+
+    # top-level scalars
+    assert result["diameter"] == pytest.approx(6.0)
+    assert result["temperature"] == pytest.approx(290.0)
+
+    # channel made it through
+    assert "vis" in result["IMAGER"]
+    chan = result["IMAGER"]["vis"]
+
+    assert chan["dc"] == pytest.approx(1.0e-5)
+    assert chan["rn"] == pytest.approx(0.1)
+    assert chan["cic"] == pytest.approx(1.3e-3)
+    assert chan["pixscale_mas"] > 0
+
+    lo, hi = chan["wavelength_range"]
+    assert lo == pytest.approx(0.4)
+    assert hi == pytest.approx(0.5)
+
+    spectral = chan["spectral"]
+    n = len(spectral["wavelength"])
+    assert (
+        n
+        == len(spectral["qe"])
+        == len(spectral["optics_throughput"])
+        == len(spectral["dqe"])
+    )
+    assert n == 2  # only wavelengths strictly inside (0.4, 0.5) survive the mask
+
+    # sanity: threading of [first, last] EAC5 masks and chan_name into API calls
+    fake_system.resolve.assert_called_once_with("CI.CI_VIS_DI")
+    fake_system.system.OpticalPath.select.assert_any_call(
+        Instrument="CI",
+        Channel="CI_VIS_DI",
+        Filter="CI_F456",
+        Mask=["EAC5_mask_1", "EAC5_mask_2"],
+    )
+
+
+def test_ingest_from_hwome_selects_first_and_last_eac5_masks(monkeypatch):
+    """When multiple EAC5 masks are present, only the first and last matching
+    masks are passed to OpticalPath.select (ignoring middle and non-EAC5 masks)."""
+    fake_system = _make_fake_hwome_system(
+        eac5_mask_names=("EAC5_first", "EAC5_middle", "EAC5_last")
+    )
+    install_fake_hwome(monkeypatch, fake_system, _fake_search_configuration)
+
+    Observatory._ingest_from_hwome(eac_name="eac5")
+
+    fake_system.system.OpticalPath.select.assert_any_call(
+        Instrument="CI",
+        Channel="CI_VIS_DI",
+        Filter="CI_F456",
+        Mask=["EAC5_first", "EAC5_last"],
+    )
+
+
+def test_ingest_from_hwome_masked_scalar_is_unmasked_to_float(monkeypatch):
+    """hwome returns scalar detector parameters as single-element masked arrays
+    (via its `.v` accessor) regardless of validity -- the mask is hwome's data
+    representation, not a signal about the data. We convert them with float(),
+    which correctly yields the underlying scalar value.
+
+    This test pins that behaviour: a masked single-element scalar from hwome
+    must survive as its plain numeric value.
+    """
+    fake_system = _make_fake_hwome_system()
+    fake_system.resolve.return_value.Detector.dark_current.v = _masked_scalar(
+        1.0e-05, masked=True
+    )
+    install_fake_hwome(monkeypatch, fake_system, _fake_search_configuration)
+
+    result = Observatory._ingest_from_hwome(eac_name="eac5")
+
+    dc = result["IMAGER"]["vis"]["dc"]
+    assert isinstance(dc, float)  # extracted to a plain Python float
+    assert dc == pytest.approx(1.0e-5)  # underlying value, mask disregarded
+
+
+def test_scalar_from_hwome_rejects_multi_element(monkeypatch):
+    """If hwome ever sends a multi-element array where a scalar is expected,
+    ingestion must fail loudly rather than silently truncate."""
+    fake_system = _make_fake_hwome_system()
+    fake_system.resolve.return_value.Detector.dark_current.v = ma.masked_array(
+        [1e-5, 2e-5], mask=[False, False]
+    )
+    install_fake_hwome(monkeypatch, fake_system, _fake_search_configuration)
+
+    with pytest.raises(ValueError, match=r"expected a scalar for"):
+        Observatory._ingest_from_hwome(eac_name="eac5")
+
+
+def test_scalar_from_hwome_never_returns_fill_value(monkeypatch):
+    """A masked scalar must yield its true underlying value, never the fill-value."""
+    fake_system = _make_fake_hwome_system()
+    fake_system.resolve.return_value.Detector.dark_current.v = _masked_scalar(
+        1.0e-05, masked=True, fill_value=1e20
+    )
+    install_fake_hwome(monkeypatch, fake_system, _fake_search_configuration)
+
+    result = Observatory._ingest_from_hwome(eac_name="eac5")
+    assert result["IMAGER"]["vis"]["dc"] == pytest.approx(1.0e-5)  # not 1e20
+
+
+def test_ingest_from_hwome_non_finite_scalar_raises(monkeypatch):
+    """A finite-typed but NaN-valued hwome scalar trips _scalar_from_hwome's
+    finiteness guard, failing loudly rather than propagating NaN."""
+    fake_system = _make_fake_hwome_system()
+    fake_system.resolve.return_value.Detector.dark_current.v = _masked_scalar(
+        np.nan, masked=False
+    )
+    install_fake_hwome(monkeypatch, fake_system, _fake_search_configuration)
+
+    with pytest.raises(ValueError, match="is not finite"):
+        Observatory._ingest_from_hwome(eac_name="eac5")
+
+
+# ============================================================================
+# Tests for Observatory.validate_engineering_config
+# ============================================================================
+
+
+def _minimal_valid_channel():
+    return {
+        "dc": 3e-5,
+        "rn": 0.1,
+        "cic": 0.0,
+        "pixscale_mas": 10.0,
+        "wavelength_range": (0.4, 0.6),
+        "spectral": {
+            "wavelength": np.array([0.4, 0.5, 0.6]),
+            "optics_throughput": np.array([0.8, 0.8, 0.8]),
+            "qe": np.array([0.9, 0.9, 0.9]),
+            "dqe": np.array([0.75, 0.75, 0.75]),
+        },
+    }
+
+
+def _minimal_valid_config():
+    return {
+        "diameter": 8.0,
+        "temperature": 290.0,
+        "IMAGER": {"vis": _minimal_valid_channel()},
+        "IFS": {"vis": _minimal_valid_channel()},
+    }
+
+
+def test_validate_engineering_config_valid():
+    """Test that a well-formed config passes without raising."""
+    Observatory.validate_engineering_config(_minimal_valid_config(), "EAC1")
+
+
+def test_validate_engineering_config_none_raises():
+    """Test that a None config raises ValueError."""
+    with pytest.raises(ValueError, match="failed to load"):
+        Observatory.validate_engineering_config(None, "EAC1")
+
+
+def test_validate_engineering_config_missing_top_level_key():
+    """Test that a missing top-level key raises ValueError."""
+    config = _minimal_valid_config()
+    del config["temperature"]
+
+    with pytest.raises(ValueError, match="missing required key 'temperature'"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_wrong_type_top_level_key():
+    """Test that a top-level key with the wrong type raises TypeError."""
+    config = _minimal_valid_config()
+    config["IMAGER"] = "not_a_dict"
+
+    with pytest.raises(TypeError, match="expected"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_bad_diameter():
+    """Test that an unphysical diameter raises ValueError."""
+    config = _minimal_valid_config()
+    config["diameter"] = -5.0
+
+    with pytest.raises(ValueError, match="looks unphysical"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_bad_temperature():
+    """Test that an unphysical temperature raises ValueError."""
+    config = _minimal_valid_config()
+    config["temperature"] = 5000.0
+
+    with pytest.raises(ValueError, match="looks unphysical"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_missing_channels():
+    """Test that an empty mode dict (no channels) raises ValueError."""
+    config = _minimal_valid_config()
+    config["IFS"] = {}
+
+    with pytest.raises(ValueError, match="must define at least one channel"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_missing_channel_scalar_key():
+    """Test that a channel missing 'dc'/'rn'/'cic' raises ValueError."""
+    config = _minimal_valid_config()
+    del config["IMAGER"]["vis"]["rn"]
+
+    with pytest.raises(ValueError, match="missing required key 'rn'"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_negative_scalar_key():
+    """Test that a negative dc/rn/cic raises ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["dc"] = -1.0
+
+    with pytest.raises(ValueError, match="must be a finite, non-negative number"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_bad_pixscale():
+    """Test that a non-positive pixscale_mas raises ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["pixscale_mas"] = 0.0
+
+    with pytest.raises(ValueError, match="must be a finite, positive number"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_missing_spectral():
+    """Test that a missing 'spectral' key raises ValueError."""
+    config = _minimal_valid_config()
+    del config["IMAGER"]["vis"]["spectral"]
+
+    with pytest.raises(ValueError, match="missing required key 'spectral'"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_missing_wavelength_range():
+    """Test that a missing 'wavelength_range' key raises ValueError."""
+    config = _minimal_valid_config()
+    del config["IMAGER"]["vis"]["wavelength_range"]
+
+    with pytest.raises(ValueError, match="missing required key 'wavelength_range'"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_spectral_missing_wavelength():
+    """Test that a spectral dict missing 'wavelength' raises ValueError."""
+    config = _minimal_valid_config()
+    del config["IMAGER"]["vis"]["spectral"]["wavelength"]
+
+    with pytest.raises(ValueError, match="missing 'wavelength'"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_spectral_length_mismatch():
+    """Test that mismatched array lengths in spectral data raise ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["spectral"]["qe"] = np.array(
+        [0.9, 0.9]
+    )  # len 2 vs wavelength len 3
+
+    with pytest.raises(ValueError, match="length mismatch"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_wavelength_not_increasing():
+    """Test that a non-monotonic wavelength array raises ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["spectral"]["wavelength"] = np.array([0.5, 0.4, 0.6])
+
+    with pytest.raises(ValueError, match="not strictly increasing"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_qe_out_of_bounds():
+    """Test that qe values outside [0, 1] raise ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["spectral"]["qe"] = np.array([0.9, 1.5, 0.9])
+
+    with pytest.raises(ValueError, match=r"must lie within \[0, 1\]"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_wavelength_range_too_narrow():
+    """Test that wavelength_range not covering the spectral domain raises ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["wavelength_range"] = (0.45, 0.5)
+
+    with pytest.raises(ValueError, match="does not"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_wavelength_range_wrong_shape():
+    """Test that a malformed wavelength_range raises ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["wavelength_range"] = (0.4, 0.5, 0.6)  # 3 elements, not 2
+
+    with pytest.raises(ValueError, match="2-element"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_wavelength_range_min_gte_max():
+    """Test that wavelength_range with min >= max raises ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["wavelength_range"] = (0.6, 0.4)
+
+    with pytest.raises(ValueError, match="must be strictly"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_nan_scalar_key_raises():
+    """Test that a NaN dc/rn/cic value raises ValueError (not silently accepted)."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["dc"] = float("nan")
+
+    with pytest.raises(ValueError, match="must be a finite"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_engineering_config_nan_pixscale_raises():
+    """Test that a NaN pixscale_mas value raises ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["pixscale_mas"] = float("nan")
+
+    with pytest.raises(ValueError, match="must be a finite"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+# ============================================================================
+# validate_engineering_config -- interior raises (nested helper coverage)
+# ============================================================================
+
+
+def test_validate_config_channel_not_a_dict_raises():
+    """A channel whose value isn't a dict raises TypeError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"] = "not_a_dict"
+    with pytest.raises(TypeError, match="must be a dict"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_config_diameter_wrong_type_raises():
+    """A non-numeric diameter raises TypeError (top-level type check)."""
+    config = _minimal_valid_config()
+    config["diameter"] = "8.0"  # string, not numeric
+    with pytest.raises(TypeError, match=r"'diameter' expected"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_config_empty_wavelength_array_raises():
+    """A present-but-empty wavelength array raises ValueError."""
+    config = _minimal_valid_config()
+    ch = config["IMAGER"]["vis"]
+    ch["spectral"]["wavelength"] = np.array([])
+    # keep the value arrays empty too, else we'd trip the length-mismatch first
+    ch["spectral"]["optics_throughput"] = np.array([])
+    ch["spectral"]["qe"] = np.array([])
+    ch["spectral"]["dqe"] = np.array([])
+    with pytest.raises(ValueError, match="empty 'wavelength' array"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_config_wavelength_contains_nan_raises():
+    """A NaN in the wavelength array raises ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["spectral"]["wavelength"] = np.array([0.4, np.nan, 0.6])
+    with pytest.raises(ValueError, match=r"'wavelength' contains NaN/Inf"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_config_missing_value_key_raises():
+    """A spectral dict missing a required value key (e.g. dqe) raises ValueError."""
+    config = _minimal_valid_config()
+    del config["IMAGER"]["vis"]["spectral"]["dqe"]
+    with pytest.raises(ValueError, match="missing 'dqe'"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_config_empty_value_array_raises():
+    """A value array of length 0 (when wavelength is non-empty) raises ValueError.
+
+    NOTE: this trips the empty-array check inside the value loop. Because the
+    length-mismatch check would ALSO fire, we must reach 'empty' first: the
+    source checks `val.size == 0` before the shape comparison, so an empty
+    qe against a length-3 wavelength hits the empty branch.
+    """
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["spectral"]["qe"] = np.array([])
+    with pytest.raises(ValueError, match=r"'qe' array is empty"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_config_value_array_contains_nan_raises():
+    """A NaN in a value array (matching length, in-bounds otherwise) raises ValueError.
+
+    Must be same length as wavelength (3) to pass the shape check and reach the
+    finiteness check -- and NOT a unity-bounded violation, so use throughput
+    with a NaN rather than an out-of-range number.
+    """
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["spectral"]["optics_throughput"] = np.array(
+        [0.8, np.nan, 0.8]
+    )
+    with pytest.raises(ValueError, match=r"'optics_throughput' contains NaN/Inf"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_config_wavelength_range_non_numeric_raises():
+    """Non-numeric wavelength_range elements raise TypeError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["wavelength_range"] = ("a", "b")
+    with pytest.raises(TypeError, match="elements must be numeric"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_config_wavelength_range_nan_raises():
+    """A NaN in wavelength_range raises ValueError."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["wavelength_range"] = (float("nan"), 0.6)
+    with pytest.raises(ValueError, match=r"'wavelength_range' contains NaN/Inf"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_config_qe_above_one_raises():
+    """A qe value > 1 trips the unity-bound upper check (line 751)."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["spectral"]["qe"] = np.array([0.9, 1.5, 0.9])
+    with pytest.raises(ValueError, match=r"must lie within \[0, 1\]"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_config_throughput_below_zero_raises():
+    """A negative throughput trips the unity-bound LOWER check (line 751)."""
+    config = _minimal_valid_config()
+    config["IMAGER"]["vis"]["spectral"]["optics_throughput"] = np.array(
+        [0.8, -0.1, 0.8]
+    )
+    with pytest.raises(ValueError, match=r"must lie within \[0, 1\]"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+def test_validate_config_missing_pixscale_key_raises():
+    """A channel missing 'pixscale_mas' entirely trips line 882."""
+    config = _minimal_valid_config()
+    del config["IMAGER"]["vis"]["pixscale_mas"]
+    with pytest.raises(ValueError, match="missing required key 'pixscale_mas'"):
+        Observatory.validate_engineering_config(config, "EAC1")
+
+
+# ============================================================================
 # Tests for Observatory.validate_configuration
 # ============================================================================
 
 
 def test_observatory_validate_configuration_valid(configured_mock_observatory):
-    """Test that validation passes with valid configuration."""
+    """Validation passes with correctly-typed, correctly-unitted attributes."""
     configured_mock_observatory.optics_throughput = [0.8] * DIMENSIONLESS
     configured_mock_observatory.total_throughput = [0.6] * QUANTUM_EFFICIENCY
     configured_mock_observatory.epswarmTrcold = [0.2] * DIMENSIONLESS
 
-    # Should not raise any exception
+    # Should not raise
     configured_mock_observatory.validate_configuration()
+
+    # And each sub-component's validation was invoked
+    configured_mock_observatory.telescope.validate_configuration.assert_called_once()
+    configured_mock_observatory.detector.validate_configuration.assert_called_once()
+    configured_mock_observatory.coronagraph.validate_configuration.assert_called_once()
 
 
 def test_observatory_validate_configuration_missing_attribute(
     configured_mock_observatory,
 ):
-    """Test that missing attribute raises AttributeError."""
+    """A missing observatory-level attribute raises AttributeError."""
     configured_mock_observatory.optics_throughput = [0.8] * DIMENSIONLESS
     configured_mock_observatory.total_throughput = [0.6] * QUANTUM_EFFICIENCY
     configured_mock_observatory.epswarmTrcold = [0.2] * DIMENSIONLESS
     delattr(configured_mock_observatory, "optics_throughput")
 
     with pytest.raises(
-        AttributeError, match="Observatory is missing attribute: optics_throughput"
+        AttributeError,
+        match=r"Observatory is missing attribute: optics_throughput",
     ):
         configured_mock_observatory.validate_configuration()
 
 
 def test_observatory_validate_configuration_not_quantity(configured_mock_observatory):
-    """Test that non-Quantity attribute raises TypeError."""
-    configured_mock_observatory.optics_throughput = 0.8
+    """A non-Quantity observatory attribute raises TypeError."""
+    configured_mock_observatory.optics_throughput = 0.8  # bare float, no unit
     configured_mock_observatory.total_throughput = [0.6] * QUANTUM_EFFICIENCY
     configured_mock_observatory.epswarmTrcold = [0.2] * DIMENSIONLESS
 
     with pytest.raises(
-        TypeError, match="Observatory attribute optics_throughput should be a Quantity"
+        TypeError,
+        match=r"Observatory attribute optics_throughput should be a Quantity",
     ):
         configured_mock_observatory.validate_configuration()
 
@@ -674,13 +1444,14 @@ def test_observatory_validate_configuration_not_quantity(configured_mock_observa
 def test_observatory_validate_configuration_incorrect_units(
     configured_mock_observatory,
 ):
-    """Test that incorrect units raise ValueError."""
-    configured_mock_observatory.optics_throughput = [0.8] * u.meter
+    """A Quantity with wrong units raises ValueError."""
+    configured_mock_observatory.optics_throughput = [0.8] * u.meter  # wrong unit
     configured_mock_observatory.total_throughput = [0.6] * QUANTUM_EFFICIENCY
     configured_mock_observatory.epswarmTrcold = [0.2] * DIMENSIONLESS
 
     with pytest.raises(
-        ValueError, match="Observatory attribute optics_throughput has incorrect units"
+        ValueError,
+        match=r"Observatory attribute optics_throughput has incorrect units",
     ):
         configured_mock_observatory.validate_configuration()
 
@@ -730,10 +1501,37 @@ def test_calculate_optics_throughput_ifs_mode(
     )
 
 
-def test_calculate_optics_throughput_from_components(
-    configured_mock_observatory, mock_observation_imager, mock_scene
+@patch("pyEDITH.observatory.utils.rebin_channel_curves_to_grid")
+def test_calculate_optics_throughput_from_eac_config(
+    mock_rebin, configured_mock_observatory, mock_observation_imager, mock_scene
 ):
-    """Test calculation of optics throughput from component throughputs."""
+    """Test optics throughput calculation from EAC config, mocking the rebin step."""
+    mock_rebin.return_value = {"optics_throughput": np.array([0.75])}
+
+    spectral = {
+        "wavelength": np.array([0.45, 0.5, 0.55]),
+        "optics_throughput": np.array([0.7, 0.8, 0.9]),
+        "qe": np.array([0.9, 0.9, 0.9]),
+        "dqe": np.array([0.75, 0.75, 0.75]),
+    }
+    configured_mock_observatory.configuration = {
+        "diameter": 8.0,
+        "temperature": 290.0,
+        "IMAGER": {
+            "vis": {
+                "dc": 3e-5,
+                "rn": 0.1,
+                "cic": 0.0,
+                "pixscale_mas": 10.0,
+                "wavelength_range": (0.45, 0.55),
+                "spectral": spectral,
+            }
+        },
+        "IFS": {},
+    }
+    configured_mock_observatory.active_channel = "vis"
+    mock_observation_imager.wavelength_range = u.Quantity([0.45, 0.55], u.micron)
+
     parameters = {"observing_mode": "IMAGER", "wavelength": 0.5}
     mediator = ObservatoryMediator(
         configured_mock_observatory, mock_observation_imager, mock_scene
@@ -741,13 +1539,28 @@ def test_calculate_optics_throughput_from_components(
 
     configured_mock_observatory.calculate_optics_throughput(parameters, mediator)
 
-    expected = [
-        configured_mock_observatory.telescope.telescope_optical_throughput.value[0]
-        * configured_mock_observatory.coronagraph.coronagraph_optical_throughput.value[
-            0
-        ]
-    ]
-    assert configured_mock_observatory.optics_throughput.value == expected
+    assert configured_mock_observatory.optics_throughput.unit == DIMENSIONLESS
+    assert np.allclose(configured_mock_observatory.optics_throughput.value, [0.75])
+
+    mock_rebin.assert_called_once()
+    called_spectral = mock_rebin.call_args.args[0]
+    assert called_spectral is spectral
+
+
+def test_calculate_optics_throughput_no_config_raises(
+    configured_mock_observatory, mock_observation_imager, mock_scene
+):
+    """Test that ValueError is raised when no T_optical and no EAC config are available."""
+    configured_mock_observatory.configuration = None
+    parameters = {"observing_mode": "IMAGER", "wavelength": 0.5}
+    mediator = ObservatoryMediator(
+        configured_mock_observatory, mock_observation_imager, mock_scene
+    )
+
+    with pytest.raises(
+        ValueError, match="Could not calculate optics throughput from the YAML files"
+    ):
+        configured_mock_observatory.calculate_optics_throughput(parameters, mediator)
 
 
 # ============================================================================
@@ -824,6 +1637,57 @@ def test_observatory_load_configuration(
     assert mock_observatory.optics_throughput.value == [0.8]
     assert hasattr(mock_observatory, "epswarmTrcold")
     assert hasattr(mock_observatory, "total_throughput")
+
+
+def test_observatory_load_configuration_toymodel_active_channel_none(
+    mock_observatory, mock_observation_imager, mock_scene
+):
+    """Test that active_channel is None when observatory has no EAC configuration."""
+    mock_observatory.configuration = None
+    parameters = {"observing_mode": "IMAGER", "T_optical": 0.8, "wavelength": 0.5}
+
+    mock_observatory.load_configuration(parameters, mock_observation_imager, mock_scene)
+
+    assert mock_observatory.active_channel is None
+
+
+def test_observatory_load_configuration_eac_selects_active_channel(
+    mock_observatory, mock_observation_imager, mock_scene
+):
+    """Test that load_configuration selects the active channel from EAC configuration."""
+    mock_observatory.configuration = {
+        "IMAGER": {
+            "vis": {"wavelength_range": (0.4, 0.6)},
+            "nir": {"wavelength_range": (0.9, 1.8)},
+        },
+        "IFS": {},
+    }
+    mock_observation_imager.wavelength_range = u.Quantity([0.45, 0.55], u.micron)
+
+    parameters = {"observing_mode": "IMAGER", "T_optical": 0.8, "wavelength": 0.5}
+
+    mock_observatory.load_configuration(parameters, mock_observation_imager, mock_scene)
+
+    assert mock_observatory.active_channel == "vis"
+
+
+def test_load_configuration_delegates_to_all_components(
+    mock_observatory, mock_observation_imager, mock_scene
+):
+    """load_configuration must invoke each sub-component's load_configuration
+    exactly once -- coverage alone won't catch a dropped delegation."""
+    parameters = {"observing_mode": "IMAGER", "T_optical": 0.8, "wavelength": 0.5}
+
+    mock_observatory.load_configuration(parameters, mock_observation_imager, mock_scene)
+
+    mock_observatory.telescope.load_configuration.assert_called_once()
+    mock_observatory.coronagraph.load_configuration.assert_called_once()
+    mock_observatory.detector.load_configuration.assert_called_once()
+
+    # And each received the SAME mediator instance (contract, not accident)
+    tel_args = mock_observatory.telescope.load_configuration.call_args.args
+    coro_args = mock_observatory.coronagraph.load_configuration.call_args.args
+    assert tel_args[1] is coro_args[1]  # same mediator threaded through
 
 
 # ============================================================================
@@ -927,3 +1791,624 @@ def test_observatory_mediator_get_scene_parameter(
     result = mediator.get_scene_parameter("vmag")
 
     assert result == mock_scene.vmag
+
+
+# ============================================================================
+# Tests for Observatory.load_eac_configuration
+# ============================================================================
+from pyEDITH.observatory import EACDataAccessError
+
+
+def test_load_eac_configuration_invalid_keyword_raises_value_error():
+    """Unsupported or malformed EAC keywords must fail fast with a ValueError."""
+    invalid_keywords = ["EAC7", "FOO", "eac_99", "", "  "]
+    for kw in invalid_keywords:
+        with pytest.raises(ValueError, match="Unsupported EAC keyword"):
+            Observatory._load_eac_configuration(kw)
+
+
+def test_load_eac_configuration_normalizes_case_and_whitespace(monkeypatch):
+    """Keywords with leading/trailing whitespace or lower case must resolve correctly."""
+    sentinel = {"from": "eacy"}
+    mock_convert = MagicMock(return_value=sentinel)
+    monkeypatch.setattr(Observatory, "_convert_eacy_to_unified_format", mock_convert)
+
+    # Test lowercase and untrimmed inputs
+    result = Observatory._load_eac_configuration("  eac1 \t")
+
+    assert result == sentinel
+    mock_convert.assert_called_once_with("EAC1")
+
+
+def test_load_eac_configuration_dispatches_to_eacy_for_eac1_3(monkeypatch):
+    """EAC1-3 route through eacy conversion without touching hwome."""
+    sentinel = {"diameter": 6.0}
+    mock_convert = MagicMock(return_value=sentinel)
+    monkeypatch.setattr(Observatory, "_convert_eacy_to_unified_format", mock_convert)
+
+    for kw in ["EAC1", "EAC2", "EAC3"]:
+        config = Observatory._load_eac_configuration(kw)
+        assert config["diameter"] == pytest.approx(6.0)
+
+    assert mock_convert.call_count == 3
+
+
+def test_load_eac_configuration_prefers_summary(monkeypatch):
+    """EAC5 summary hit skips hwome import and ingestion entirely."""
+    sentinel = {"from": "summary"}
+    monkeypatch.setattr(
+        Observatory,
+        "_ingest_from_summary",
+        staticmethod(lambda eac_name: sentinel if eac_name == "eac5" else None),
+    )
+
+    def _boom(*args, **kwargs):
+        raise AssertionError(
+            "hwome ingestion path must not be executed when summary exists"
+        )
+
+    monkeypatch.setattr(Observatory, "_ingest_from_hwome", staticmethod(_boom))
+
+    # Ensures that even if hwome is missing from environment, summary path succeeds
+    monkeypatch.setitem(sys.modules, "hwome", None)
+
+    assert Observatory._load_eac_configuration("EAC5") is sentinel
+
+
+def test_load_eac_configuration_falls_back_to_hwome(monkeypatch):
+    """EAC5 falls back to live hwome when summary is unavailable (None)."""
+    # 1. Summary returns None
+    monkeypatch.setattr(
+        Observatory, "_ingest_from_summary", staticmethod(lambda eac_name: None)
+    )
+
+    # 2. Mock hwome package import
+    fake_hwome = MagicMock()
+    monkeypatch.setitem(sys.modules, "hwome", fake_hwome)
+
+    # 3. Ingest from hwome returns expected dict
+    sentinel = {"from": "hwome"}
+    monkeypatch.setattr(
+        Observatory,
+        "_ingest_from_hwome",
+        staticmethod(lambda eac_name: sentinel if eac_name == "eac5" else None),
+    )
+
+    assert Observatory._load_eac_configuration("EAC5") is sentinel
+
+
+def test_load_eac_configuration_raises_eac_data_access_error_when_hwome_missing(
+    monkeypatch,
+):
+    """EAC4-6 without summary or hwome package raises EACDataAccessError."""
+    monkeypatch.setattr(
+        Observatory, "_ingest_from_summary", staticmethod(lambda eac_name: None)
+    )
+
+    # Force hwome import to raise ModuleNotFoundError
+    monkeypatch.delitem(sys.modules, "hwome", raising=False)
+
+    # Block import machinery from finding real hwome if installed locally
+    def raise_module_not_found(name, *args, **kwargs):
+        if name == "hwome":
+            raise ModuleNotFoundError("No module named 'hwome'")
+        return __import__(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", raise_module_not_found)
+
+    with pytest.raises(EACDataAccessError, match="not included in this public build"):
+        Observatory._load_eac_configuration("EAC5")
+
+
+def test_load_eac_configuration_propagates_internal_hwome_runtime_errors(monkeypatch):
+    """Execution errors inside _ingest_from_hwome must propagate natively, not as access errors."""
+    monkeypatch.setattr(
+        Observatory, "_ingest_from_summary", staticmethod(lambda eac_name: None)
+    )
+    monkeypatch.setitem(sys.modules, "hwome", MagicMock())
+
+    def _internal_failure(eac_name):
+        raise KeyError("Missing required file in hwome model")
+
+    monkeypatch.setattr(
+        Observatory, "_ingest_from_hwome", staticmethod(_internal_failure)
+    )
+
+    with pytest.raises(KeyError, match="Missing required file"):
+        Observatory._load_eac_configuration("EAC5")
+
+
+# ============================================================================
+# Tests for Observatory._ingest_from_summary (YAML summary path)
+# ============================================================================
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# Fixture builders
+# ---------------------------------------------------------------------------
+def _curve_block(wl_nm, val):
+    """Build a {wavelength:{value,unit}, value} block (wavelengths in nm)."""
+    return {
+        "wavelength": {"value": list(map(float, wl_nm)), "unit": "nm"},
+        "value": list(map(float, val)),
+    }
+
+
+def _ci_channel(
+    instr,
+    plate,
+    cwl,
+    cval,
+    full_key,
+    center,
+    width,
+    detector_key,
+    *,
+    full_throughput=0.91,
+    mask_throughput=0.95,
+    band_min=100.0,
+    band_max=2500.0,
+    extra_filters=None,
+):
+    """A CI channel block faithful to the real summary layout.
+    NOTE: All numbers are made up, since we are just testing maths."""
+    filters = {
+        full_key: {
+            "center": {"value": center, "unit": "nm"},
+            "width": {"value": width, "unit": "nm"},
+            "edge_width": {"value": 14.0, "unit": "nm"},
+            "floor_trans": 2e-10,
+            "throughput": _curve_block(cwl, np.full_like(cwl, full_throughput)),
+        },
+        # A narrow science tophat that must NOT be chosen by _select_channel_filter.
+        "CI_F676": {
+            "center": {"value": 676.0, "unit": "nm"},
+            "width": {"value": 30.0, "unit": "nm"},
+            "edge_width": {"value": 16.0, "unit": "nm"},
+            "floor_trans": 2e-10,
+            "throughput": _curve_block(cwl, np.full_like(cwl, 0.82)),
+        },
+    }
+    if extra_filters:
+        filters.update(extra_filters)
+    return {
+        "instrument": instr,
+        "plate_scale": {"value": plate, "unit": "arcsec / pix"},
+        "band_min": {"value": band_min, "unit": "nm"},
+        "band_max": {"value": band_max, "unit": "nm"},
+        "throughput": _curve_block(cwl, np.full_like(cwl, cval)),
+        "masks": {
+            "throughput": _curve_block(cwl, np.full_like(cwl, mask_throughput)),
+        },
+        "filters": filters,
+        "detector": detector_key,
+    }
+
+
+def _summary_dict(eac_name="eac5"):
+    """A structurally faithful, minimal summary dict matching the REAL file:
+    channels, per-channel FULL keys, spaced detector keys, Bridge not NIR_IFS."""
+    # Curves deliberately start at 90 nm as in the real file.
+    tele_wl = np.linspace(90.0, 3000.0, 300)
+    vis_wl = np.linspace(90.0, 2500.0, 120)
+    nir_wl = np.linspace(90.0, 2500.0, 120)
+    brg_wl = np.linspace(90.0, 2500.0, 120)
+    qe_wl = np.linspace(90.0, 2500.0, 200)
+
+    DET_VIS = "DET_A"
+    DET_NIR = "DET_B"
+
+    return {
+        "configuration": eac_name,
+        "telescope": {
+            "circumscribing_diameter": {"value": 8, "unit": "m"},
+            "primary_temperature": {"value": 293.0, "unit": "K"},
+            "focal_length": {"value": 150, "unit": "m"},
+            "throughput": _curve_block(tele_wl, np.full_like(tele_wl, 0.88)),
+        },
+        "channels": {
+            "CI_VIS_DI": _ci_channel(
+                "CI",
+                0.003546,
+                vis_wl,
+                0.35,
+                "CI_FULL_VIS",
+                600.0,
+                440.0,
+                DET_VIS,
+                full_throughput=0.91,
+                mask_throughput=0.95,
+            ),
+            "CI_NIR_DI": _ci_channel(
+                "CI",
+                0.00545,
+                nir_wl,
+                0.234,
+                "CI_FULL_NIR",
+                1350.0,
+                550.0,
+                DET_NIR,
+                full_throughput=0.905,
+                mask_throughput=0.95,
+            ),
+            "CI_Bridge_DI": _ci_channel(
+                "CI",
+                0.00534,
+                brg_wl,
+                0.256,
+                "CI_FULL_BRIDGE",
+                1000.0,
+                300.0,
+                DET_NIR,
+                full_throughput=0.88,
+                mask_throughput=0.95,
+            ),
+            "CI_VIS_IFS": _ci_channel(
+                "CI",
+                0.0003566,
+                vis_wl,
+                0.389,
+                "CI_FULL_VIS",
+                600.0,
+                440.0,
+                DET_VIS,
+                full_throughput=0.91,
+                mask_throughput=0.95,
+            ),
+            "CI_Bridge_IFS": _ci_channel(
+                "CI",
+                0.0014523,
+                brg_wl,
+                0.2456,
+                "CI_FULL_BRIDGE",
+                1000.0,
+                300.0,
+                DET_NIR,
+                full_throughput=0.88,
+                mask_throughput=0.95,
+            ),
+            # Non-CI channel: must be ignored by the reader.
+            "HRI_A_VIS": _ci_channel(
+                "HRI_A",
+                0.00532425,
+                vis_wl,
+                0.33235,
+                "HRI_FULL_VIS",
+                600.0,
+                440.0,
+                DET_VIS,
+                full_throughput=0.91,
+                mask_throughput=0.95,
+            ),
+        },
+        "detectors": {
+            DET_VIS: {
+                "read_noise": {"value": 0.0, "unit": "ct / pix"},
+                "dark_current": {"value": 4.5e-5, "unit": "ct / (pix s)"},
+                "pixel_pitch": {"value": 5.5e-6, "unit": "m"},
+                "qe": _curve_block(qe_wl, np.full_like(qe_wl, 0.93)),
+                "cic": 0.0,  # bare scalar form
+                "dqe": 0.75,
+            },
+            DET_NIR: {
+                "read_noise": {"value": 0.3, "unit": "ct / pix"},
+                "dark_current": {"value": 0.00235, "unit": "ct / (pix s)"},
+                "pixel_pitch": {"value": 3e-5, "unit": "m"},
+                "qe": _curve_block(qe_wl, np.full_like(qe_wl, 0.92)),
+                "cic": {"value": 0.0014, "unit": "ct / pix"},  # {value, unit} form
+                "dqe": 0.75,
+            },
+        },
+    }
+
+
+def _write_summary(dirpath, eac_name="eac5", mutate=None):
+    """Serialise the faithful summary dict to <eac>_summary.yaml.
+
+    ``mutate`` is an optional callable(dict)->dict applied before writing,
+    used by the negative-path tests to inject specific corruptions.
+    """
+    import yaml
+
+    data = _summary_dict(eac_name)
+    if mutate is not None:
+        data = mutate(data) or data
+    path = Path(dirpath, f"{eac_name}_summary.yaml")
+    with open(path, "w") as fh:
+        yaml.safe_dump(data, fh)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Happy-path: faithful fixture
+# ---------------------------------------------------------------------------
+def test_ingest_from_summary_builds_valid_unified_config(tmp_path, monkeypatch):
+    _write_summary(tmp_path)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+
+    cfg = Observatory._ingest_from_summary("eac5")
+    Observatory.validate_engineering_config(cfg, "EAC5")
+
+    assert cfg["diameter"] == pytest.approx(8)
+    assert cfg["temperature"] == pytest.approx(293.0)
+
+    assert set(cfg["IMAGER"]) == {"vis", "nir", "bridge"}
+    assert set(cfg["IFS"]) == {"vis", "bridge"}
+
+    vis = cfg["IMAGER"]["vis"]
+    # FULL_VIS flat-top is 600 +/- 220 nm -> 0.38..0.82 um (within band_min/max).
+    assert vis["wavelength_range"] == pytest.approx((0.38, 0.82))
+    assert vis["pixscale_mas"] == pytest.approx(0.003546 * 1e3)
+
+    assert vis["cic"] == pytest.approx(0.0)
+    assert cfg["IMAGER"]["nir"]["cic"] == pytest.approx(0.0014)
+    assert cfg["IMAGER"]["bridge"]["cic"] == pytest.approx(0.0014)
+
+    spec = vis["spectral"]
+    n = len(spec["wavelength"])
+    assert n == len(spec["qe"]) == len(spec["optics_throughput"]) == len(spec["dqe"])
+    assert np.all(np.diff(spec["wavelength"]) > 0)
+    # optics = telescope(0.88) x channel(0.35) x mask(0.95) x FULL(0.91).
+    assert np.allclose(spec["optics_throughput"], 0.88 * 0.35 * 0.95 * 0.91)
+    assert np.allclose(spec["qe"], 0.93)
+    assert np.allclose(spec["dqe"], 0.75)
+
+
+def test_ingest_from_summary_bridge_channel_naming(tmp_path, monkeypatch):
+    _write_summary(tmp_path)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+
+    cfg = Observatory._ingest_from_summary("eac5")
+    assert "bridge" in cfg["IFS"]
+    assert "bridge" in cfg["IMAGER"]
+    assert cfg["IFS"]["bridge"]["wavelength_range"] == pytest.approx((0.85, 1.15))
+
+
+def test_ingest_from_summary_clamps_to_band_min_and_band_max(tmp_path, monkeypatch):
+    def mutate(data):
+        # FULL_VIS spans 380..820 nm; clamp it tighter with band_min/band_max.
+        vis = data["channels"]["CI_VIS_DI"]
+        vis["band_min"] = {"value": 450.0, "unit": "nm"}
+        vis["band_max"] = {"value": 750.0, "unit": "nm"}
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+
+    cfg = Observatory._ingest_from_summary("eac5")
+    vis = cfg["IMAGER"]["vis"]
+    assert vis["wavelength_range"] == pytest.approx((0.45, 0.75))
+    wl = vis["spectral"]["wavelength"]
+    assert wl.min().value > 0.45
+    assert wl.max().value < 0.75
+
+
+def test_ingest_from_summary_scalar_accepts_bare_and_dict_forms(tmp_path, monkeypatch):
+    def mutate(data):
+        # Force the UNtested _scalar input shape (flip dict<->bare).
+        det = data["detectors"]["DET_A"]
+        det["dark_current"] = {"value": 3e-5, "unit": "ct / (pix s)"}  # dict form
+        det["read_noise"] = {"value": 0.0, "unit": "ct / pix"}  # dict form
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    cfg = Observatory._ingest_from_summary("eac5")
+    assert cfg["IMAGER"]["vis"]["dc"] == pytest.approx(3e-5)
+
+
+def test_ingest_from_summary_filter_throughput_as_curve(tmp_path, monkeypatch):
+    # Filter transmission linearly ramps 0.5 -> 1.0 across the VIS band.
+    fwl = [350.0, 600.0, 850.0]  # nm, spans FULL_VIS flat-top (380..820)
+    fval = [0.5, 0.75, 1.0]
+
+    def mutate(data):
+        full = data["channels"]["CI_VIS_DI"]["filters"]["CI_FULL_VIS"]
+        full["throughput"] = _curve_block(fwl, fval)
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+
+    cfg = Observatory._ingest_from_summary("eac5")
+    spec = cfg["IMAGER"]["vis"]["spectral"]
+    grid_um = np.asarray(spec["wavelength"])
+    # Reconstruct expected filter curve on the grid (interp in um).
+    exp_filter = np.interp(grid_um, np.asarray(fwl) * 1e-3, fval)
+    # optics = telescope(0.88) x channel(0.35) x mask(0.95) x filter-curve.
+    assert np.allclose(spec["optics_throughput"], 0.88 * 0.35 * 0.95 * exp_filter)
+    # Must vary across the band -> proves the curve branch actually ran.
+    assert spec["optics_throughput"].min() < spec["optics_throughput"].max()
+
+
+def test_ingest_from_summary_mask_throughput_as_curve(tmp_path, monkeypatch):
+    # Mask transmission ramps 0.6 -> 0.9 across the VIS band.
+    mwl = [350.0, 600.0, 850.0]
+    mval = [0.6, 0.75, 0.9]
+
+    def mutate(data):
+        data["channels"]["CI_VIS_DI"]["masks"]["throughput"] = _curve_block(mwl, mval)
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+
+    cfg = Observatory._ingest_from_summary("eac5")
+    spec = cfg["IMAGER"]["vis"]["spectral"]
+    grid_um = np.asarray(spec["wavelength"])
+    exp_mask = np.interp(grid_um, np.asarray(mwl) * 1e-3, mval)
+    # optics = telescope(0.88) x channel(0.35) x mask-curve x FULL(0.91).
+    assert np.allclose(spec["optics_throughput"], 0.88 * 0.35 * exp_mask * 0.91)
+    assert spec["optics_throughput"].min() < spec["optics_throughput"].max()
+
+
+# ---------------------------------------------------------------------------
+# Negative-path: validation & error handling
+# ---------------------------------------------------------------------------
+def test_ingest_from_summary_raises_on_empty_band_overlap(tmp_path, monkeypatch):
+    def mutate(data):
+        full = data["channels"]["CI_VIS_DI"]["filters"]["CI_FULL_VIS"]
+        full["center"] = {"value": 9000.0, "unit": "nm"}  # far beyond 2500 nm curves
+        full["width"] = {"value": 100.0, "unit": "nm"}
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="empty wavelength overlap"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_ingest_from_summary_raises_on_empty_grid(tmp_path, monkeypatch):
+    import yaml
+
+    # Build a channel whose curves are coarse and whose FULL band is a sliver
+    # positioned strictly between two adjacent sample points.
+    data = _summary_dict()
+    coarse = _curve_block([90.0, 650.0, 660.0, 2500.0], [0.35, 0.35, 0.35, 0.35])
+    data["channels"]["CI_VIS_DI"]["throughput"] = coarse
+    data["telescope"]["throughput"] = _curve_block(
+        [90.0, 650.0, 660.0, 2500.0], [0.88, 0.88, 0.88, 0.88]
+    )
+    data["detectors"]["DET_A"]["qe"] = _curve_block(
+        [90.0, 650.0, 660.0, 2500.0], [0.9, 0.9, 0.9, 0.9]
+    )
+    full = data["channels"]["CI_VIS_DI"]["filters"]["CI_FULL_VIS"]
+    full["center"] = {"value": 655.0, "unit": "nm"}  # band 654..656, between samples
+    full["width"] = {"value": 2.0, "unit": "nm"}
+
+    path = Path(tmp_path, "eac5_summary.yaml")
+    with open(path, "w") as fh:
+        yaml.safe_dump(data, fh)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+
+    with pytest.raises(ValueError, match="no sample points"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_ingest_from_summary_raises_when_no_full_filter(tmp_path, monkeypatch):
+    def mutate(data):
+        # Strip the FULL filter from the VIS channel.
+        data["channels"]["CI_VIS_DI"]["filters"].pop("CI_FULL_VIS")
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="no FULL filter"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_ingest_from_summary_raises_on_mismatched_curve_lengths(tmp_path, monkeypatch):
+    def mutate(data):
+        data["telescope"]["throughput"] = {
+            "wavelength": {"value": [300.0, 400.0, 500.0], "unit": "nm"},
+            "value": [0.88, 0.88],  # one short
+        }
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="mismatched/empty"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_ingest_from_summary_raises_on_malformed_curve_block(tmp_path, monkeypatch):
+    def mutate(data):
+        data["telescope"]["throughput"] = {"value": [0.88, 0.88]}  # no 'wavelength'
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="malformed curve"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_ingest_from_summary_raises_on_malformed_mask_curve(tmp_path, monkeypatch):
+    def mutate(data):
+        data["channels"]["CI_VIS_DI"]["masks"]["throughput"] = {"value": [0.95]}
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="malformed curve"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_ingest_from_summary_raises_on_negative_scalar(tmp_path, monkeypatch):
+    def mutate(data):
+        data["detectors"]["DET_A"]["read_noise"] = {
+            "value": -1.0,
+            "unit": "ct / pix",
+        }
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="must be finite and"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_ingest_from_summary_raises_on_non_numeric_scalar(tmp_path, monkeypatch):
+    def mutate(data):
+        data["channels"]["CI_VIS_DI"]["plate_scale"] = {
+            "value": "not-a-number",
+            "unit": "arcsec / pix",
+        }
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="expected a scalar"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_ingest_from_summary_returns_none_when_dir_unset(monkeypatch):
+    monkeypatch.delenv("EAC_SUMMARY_DIR", raising=False)
+    assert Observatory._ingest_from_summary("eac5") is None
+
+
+def test_ingest_from_summary_returns_none_when_file_missing(tmp_path, monkeypatch):
+    empty = tmp_path / "definitely_empty"
+    empty.mkdir()
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(empty))
+    assert not (empty / "eac5_summary.yaml").exists()
+    assert Observatory._ingest_from_summary("eac5") is None
+
+
+def test_ingest_from_summary_raises_on_missing_top_level_structure(
+    tmp_path, monkeypatch
+):
+    def mutate(data):
+        del data["telescope"]["circumscribing_diameter"]  # KeyError inside the try
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="missing required top-level structure"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_scalar_raises_valueerror_on_non_numeric_string(tmp_path, monkeypatch):
+    def mutate(data):
+        data["detectors"]["DET_A"]["dqe"] = "not-a-number"
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="expected a scalar"):
+        Observatory._ingest_from_summary("eac5")
+
+
+def test_scalar_raises_typeerror_on_wrong_type(tmp_path, monkeypatch):
+    def mutate(data):
+        data["detectors"]["DET_A"]["dqe"] = [1, 2, 3]  # float([...]) -> TypeError
+        return data
+
+    _write_summary(tmp_path, mutate=mutate)
+    monkeypatch.setenv("EAC_SUMMARY_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="expected a scalar"):
+        Observatory._ingest_from_summary("eac5")

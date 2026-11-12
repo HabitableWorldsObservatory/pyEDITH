@@ -156,6 +156,55 @@ def test_formatter_no_color_info():
     assert ColorCodes.ERROR not in formatted
 
 
+def test_adds_null_handler_when_no_handlers(monkeypatch):
+    """
+    When the root logger has no handlers, importing the package should
+    attach a NullHandler (library best practice to suppress the
+    'No handlers could be found' warning).
+    """
+    root = logging.getLogger()
+
+    # monkeypatch.setattr records the original value and restores it
+    # automatically at teardown—no try/finally required.
+    monkeypatch.setattr(root, "handlers", [])
+
+    # Re-import the package so __init__.py executes afresh against
+    # our handler-less root logger. Replace 'pyEDITH' as appropriate.
+    import pyEDITH
+
+    importlib.reload(pyEDITH)
+
+    # Assert the branch fired: a NullHandler must now be present.
+    assert any(
+        isinstance(h, logging.NullHandler) for h in root.handlers
+    ), "Expected __init__ to attach a NullHandler when none existed"
+
+
+def test_init_skips_null_handler_when_handlers_exist(monkeypatch):
+    """
+    When the root logger already has handlers, importing the package
+    should NOT add another NullHandler (avoiding duplicate handlers).
+    """
+    root = logging.getLogger()
+
+    # monkeypatch.setattr records the original value and restores it
+    # automatically at teardown—no try/finally required.
+    monkeypatch.setattr(root, "handlers", [])
+
+    # Contrive a state with exactly one non-Null handler present.
+    sentinel = logging.StreamHandler()
+    root.handlers = [sentinel]
+
+    import pyEDITH
+
+    importlib.reload(pyEDITH)
+
+    # The NullHandler must NOT have been added.
+    null_handlers = [h for h in root.handlers if isinstance(h, logging.NullHandler)]
+    assert not null_handlers, "NullHandler should not be added when handlers exist"
+    assert sentinel in root.handlers
+
+
 def test_pyedith_logger_exists():
     """Check that pyedith_logger is created."""
     from pyEDITH import pyedith_logger
@@ -361,7 +410,6 @@ def test_main_functions_importable():
     """Check that main functions are importable from pyEDITH."""
     from pyEDITH import (
         calculate_exposure_time_or_snr,
-        generate_radii,
         calculate_texp,
         calculate_snr,
     )
@@ -369,7 +417,6 @@ def test_main_functions_importable():
     assert all(
         [
             calculate_exposure_time_or_snr,
-            generate_radii,
             calculate_texp,
             calculate_snr,
         ]
@@ -415,7 +462,6 @@ def test_all_contents():
         "calculate_texp",
         "calculate_snr",
         "parse_input",
-        "generate_radii",
     ]
     for item in expected:
         assert item in pyEDITH.__all__, f"{item} not in __all__"

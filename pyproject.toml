@@ -24,6 +24,7 @@ dependencies = [
   "synphot",
   "eacy",
   "hwostyle",
+  "pyyaml",
 ]
 
 # Optional dependencies for testing
@@ -46,3 +47,6 @@ include-package-data = true
 
 [project.scripts]
 pyedith = "pyEDITH.cli:main"
+
+[tool.pytest.ini_options]
+addopts = "-ra --cov=pyEDITH --cov-report=html --cov-report=term-missing --cov-branch"

@@ -4,6 +4,7 @@ from . import utils
 import astropy.units as u
 from .units import *
 from pyEDITH import parse_input
+import copy
 
 
 class Telescope(ABC):
@@ -23,8 +24,6 @@ class Telescope(ABC):
         Fixed overhead time in seconds.
     toverhead_multi : float
         Multiplicative overhead time.
-    telescope_optical_throughput : numpy.ndarray
-        Array of throughput values.
     temperature : float
         Temperature of the warm optics.
     T_contamination : float
@@ -67,7 +66,6 @@ class Telescope(ABC):
             "Area": LENGTH**2,
             "toverhead_fixed": TIME,
             "toverhead_multi": DIMENSIONLESS,
-            "telescope_optical_throughput": DIMENSIONLESS,
             "temperature": TEMPERATURE,
             "T_contamination": DIMENSIONLESS,
         }
@@ -110,13 +108,12 @@ class ToyModelTelescope(Telescope):
         "unobscured_area": (1.0 - 0.121),  # unobscured area (percentage,scalar)
         "toverhead_fixed": 8.25e3 * TIME,  # fixed overhead time (seconds,scalar)
         "toverhead_multi": 1.1 * DIMENSIONLESS,  # multiplicative overhead time (scalar)
-        "telescope_optical_throughput": [0.823]
-        * DIMENSIONLESS,  # Optical throughput (nlambda array) [made up from EAC1-ish]
+        # * DIMENSIONLESS,  # Optical throughput (nlambda array) [made up from EAC1-ish]
         "temperature": 290 * TEMPERATURE,
         "T_contamination": 0.95 * DIMENSIONLESS,
     }
 
-    def __init__(self, path: str = None, keyword: str = None):
+    def __init__(self, path: str = None, keyword: str = "ToyModel"):
         """
         Initialize a ToyModelTelescope instance.
 
@@ -130,6 +127,7 @@ class ToyModelTelescope(Telescope):
 
         self.path = path
         self.keyword = keyword
+        self.DEFAULT_CONFIG = copy.deepcopy(self.DEFAULT_CONFIG)
 
     def load_configuration(self, parameters: dict, mediator: object) -> None:
         """
@@ -152,14 +150,6 @@ class ToyModelTelescope(Telescope):
 
         # Load parameters, use defaults if not provided
         utils.fill_parameters(self, parameters, self.DEFAULT_CONFIG, self.LOCKED_KEYS)
-
-        # Convert to numpy array when appropriate
-        array_params = [
-            "telescope_optical_throughput",
-        ]
-        # TODO rebin at new wavelength
-
-        utils.convert_to_numpy_array(self, array_params)
 
         # Derived parameters
         # effective collecting area of telescope (m^2) # scalar
@@ -191,7 +181,6 @@ class EACTelescope(Telescope):
         "unobscured_area",
         "T_contamination",
         "temperature",
-        "telescope_optical_throughput",
     }
 
     DEFAULT_CONFIG = {
@@ -201,11 +190,9 @@ class EACTelescope(Telescope):
         * TIME,  # fixed overhead time (seconds,scalar) ### NOTE default for now
         "toverhead_multi": 1.1
         * DIMENSIONLESS,  # multiplicative overhead time (scalar) ### NOTE default for now
-        "telescope_optical_throughput": None,  # Optical throughput (nlambda array)
         "T_contamination": 1.0
         * DIMENSIONLESS,  # Effective throughput factor to budget for contamination; NOTE: missing from YAML files
-        "temperature": 290
-        * TEMPERATURE,  # Temperature of the warm optics; NOTE: missing from YAML files
+        "temperature": None,  # (now a variable)
     }
 
     def __init__(self, path: str = None, keyword: str = None):
@@ -222,17 +209,18 @@ class EACTelescope(Telescope):
 
         self.path = path
         self.keyword = keyword
+        self.DEFAULT_CONFIG = copy.deepcopy(self.DEFAULT_CONFIG)
 
     def load_configuration(self, parameters: dict, mediator: object) -> None:
         """
-        Load configuration parameters from the YAML files using EACy.
+        Load configuration parameters from unified EAC configuration.
 
-        This method initializes telescope attributes using parameters from EAC YAML
-        configuration files. It handles both IMAGER and IFS observing modes,
-        loading appropriate telescope characteristics including diameter and optical
-        throughput. For IMAGER mode, parameters are averaged over the specified
-        wavelength range, while for IFS mode, parameters are interpolated onto
-        the observation wavelength grid.
+        This method initializes telescope attributes using the unified configuration
+        from the Observatory (which handles hwome/eacy loading). It handles both
+        IMAGER and IFS observing modes, loading appropriate telescope characteristics
+        including diameter and optical throughput. For IMAGER mode, parameters are
+        averaged over the specified wavelength range, while for IFS mode, parameters
+        are interpolated onto the observation wavelength grid.
 
         Parameters
         ----------
@@ -249,39 +237,19 @@ class EACTelescope(Telescope):
         """
         parameters = parse_input.parse_parameters(parameters)
 
-        from eacy import load_telescope
+        # Get unified EAC configuration from observatory
+        eac_config = mediator.get_eac_configuration()
 
-        # **** LOAD DEFAULTS FROM EAC YAML FILES AND UPDATE DEFAULT CONFIG ****
-
-        # Load parameters from YAML files
-        telescope_params = load_telescope(self.keyword).__dict__
-        if mediator.get_observation_parameter("observing_mode") == "IMAGER":
-
-            telescope_params = utils.average_over_bandpass(
-                telescope_params, mediator.get_observation_parameter("wavelength_range")
+        # For EAC telescopes, configuration must be available
+        if eac_config is None:
+            raise RuntimeError(
+                f"Failed to load EAC configuration for {self.keyword}. "
+                f"Cannot proceed with telescope initialization."
             )
 
-        elif mediator.get_observation_parameter("observing_mode") == "IFS":
-            # interpolate telescope throughput onto native wavelength grid
-            telescope_params = utils.interpolate_over_bandpass(
-                telescope_params, mediator.get_observation_parameter("wavelength")
-            )
-
-        # Load parameters that you need from the YAML files
-        self.DEFAULT_CONFIG["diameter"] = telescope_params["diam_circ"] * LENGTH
-
-        # Ensure telescope_optical_throughput has dimensions nlambda
-        if np.isscalar(telescope_params["total_tele_refl"]):
-            self.DEFAULT_CONFIG["telescope_optical_throughput"] = (
-                np.array([telescope_params["total_tele_refl"]]) * DIMENSIONLESS
-            )
-        else:
-            self.DEFAULT_CONFIG["telescope_optical_throughput"] = (
-                np.array(telescope_params["total_tele_refl"]) * DIMENSIONLESS
-            )
-        # ****** Update Default Config when necessary ******
-        # TODO: wavelength_range probably should not depend on the coronagraph bandwidth; let's discuss
-        # the coronagraph module needs the telescope module to be initialized first to get the telescope diameter
+        # Extract telescope parameters
+        self.DEFAULT_CONFIG["diameter"] = eac_config["diameter"] * LENGTH
+        self.DEFAULT_CONFIG["temperature"] = eac_config["temperature"] * TEMPERATURE
 
         # Load parameters, use defaults if not provided
         utils.fill_parameters(

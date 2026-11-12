@@ -14,6 +14,23 @@ from pyEDITH import detectors, parse_input, telescopes
 
 logger = logging.getLogger("pyEDITH")
 
+EAC_LEGACY = {"EAC1", "EAC2", "EAC3"}
+EAC_PROPRIETARY = {"EAC4", "EAC5", "EAC6"}
+SUPPORTED_EACS = EAC_LEGACY | EAC_PROPRIETARY
+
+
+class EACDataAccessError(Exception):
+    """Raised when proprietary EAC engineering data is inaccessible."""
+
+    pass
+
+
+# Effective QE due to degradation, cosmic ray effects, and readout
+# inefficiencies. Not yet tracked by eacy or hwome engineering data;
+# this is a placeholder until real per-channel values are available.
+# TODO: replace with real values once available from eacy/hwome.
+DEFAULT_DQE = 0.75
+
 
 class Observatory(ABC):  # abstract class
     """
@@ -133,7 +150,7 @@ class Observatory(ABC):  # abstract class
             telescope = Observatory._create_telescope(preset["telescope"])
             coronagraph = Observatory._create_coronagraph(preset["coronagraph"])
             detector = Observatory._create_detector(preset["detector"])
-
+            keyword = preset["telescope"]
         # Else, the user provided details in a config dictionary
         elif isinstance(config, dict):
             # Custom config mode
@@ -145,7 +162,7 @@ class Observatory(ABC):  # abstract class
             telescope = Observatory._create_telescope(config["telescope"])
             coronagraph = Observatory._create_coronagraph(config["coronagraph"])
             detector = Observatory._create_detector(config["detector"])
-
+            keyword = config["telescope"]
         else:
             raise ValueError("Invalid configuration.")
 
@@ -153,6 +170,14 @@ class Observatory(ABC):  # abstract class
         self.coronagraph = coronagraph
         self.detector = detector
 
+        # Load unified EAC configuration (from hwome or eacy)
+        if keyword.startswith("EAC"):
+            self.configuration = Observatory._load_eac_configuration(keyword)
+            # validate configuration
+            Observatory.validate_engineering_config(self.configuration, keyword)
+
+        else:
+            self.configuration = None
         return
 
     @staticmethod
@@ -292,6 +317,867 @@ class Observatory(ABC):  # abstract class
                 f"Unknown detector type: {keyword}. " f"Expected 'ToyModel' or 'EAC*'"
             )
 
+    @staticmethod
+    def _load_eac_configuration(eac_keyword: str) -> dict:
+        """
+        Load EAC configuration from eacy, YAML summary, or live hwome model.
+
+        Parameters
+        ----------
+        eac_keyword : str
+            EAC configuration identifier (e.g., "EAC1", "EAC5", "TOYMODEL").
+
+        Returns
+        -------
+        dict
+            Validated unified configuration dictionary.
+        """
+        normalized_key = eac_keyword.strip().upper()
+
+        if normalized_key not in SUPPORTED_EACS:
+            raise ValueError(
+                f"Unsupported EAC keyword '{eac_keyword}'. "
+                f"Must be one of {sorted(list(SUPPORTED_EACS))}."
+            )
+
+        # Route EAC4-6 (Proprietary / High-Fidelity Engineering Models)
+        if normalized_key in EAC_PROPRIETARY:
+            eac_name_lower = normalized_key.lower()
+
+            # Step 1: Try local/environment YAML summary
+            config = Observatory._ingest_from_summary(eac_name=eac_name_lower)
+            if config is not None:
+                logger.info(
+                    f"Loaded {normalized_key} from YAML summary (EAC_SUMMARY_DIR)"
+                )
+                return config
+
+            # Step 2: Fall back to live hwome package
+            logger.info(
+                f"YAML summary for {normalized_key} unavailable; attempting hwome import"
+            )
+            try:
+                import hwome
+            except ModuleNotFoundError as e:
+                raise EACDataAccessError(
+                    f"{normalized_key} engineering data is proprietary and not included in this public build. "
+                    f"To enable {normalized_key}, set EAC_SUMMARY_DIR to a directory containing "
+                    f"'{eac_name_lower}_summary.yaml' or install the internal 'hwome' package. "
+                    f"EAC1-3 and ToyModel remain fully accessible."
+                ) from e
+
+            # Allow native hwome execution errors to propagate normally if hwome is installed
+            config = Observatory._ingest_from_hwome(eac_name=eac_name_lower)
+            return config
+
+        # Route EAC1-3 (Public Baseline)
+        logger.info(f"Loading {normalized_key} baseline configuration from eacy")
+        config = Observatory._convert_eacy_to_unified_format(normalized_key)
+        return config
+
+    @staticmethod
+    def _convert_eacy_to_unified_format(eac_keyword):
+        """
+        Convert eacy data to unified hwome-like configuration format, for
+        BOTH observing modes (IMAGER and IFS), matching how hwome-derived
+        configs are structured.
+
+        eacy's detector QE/RN/DC genuinely differ between IMAGER and IFS mode
+        (different YAML blocks -- see eacy's DETECTOR.load_imager vs
+        DETECTOR.load_IFS), so load_detector() is called once per mode here
+        to build two distinct mode configs. Telescope and instrument optics
+        throughput, however, do NOT depend on mode in eacy (single curve from
+        load_telescope/load_instrument) -- that same curve is reused for both
+        mode configs below, sliced per-channel to match each mode's QE domain.
+
+        Preserves eacy's native vis/nir split as two distinct channels
+        ("vis", "nir") rather than concatenating them into one curve.
+
+        Parameters
+        ----------
+        eac_keyword : str
+            EAC configuration keyword (e.g., "EAC1", "EAC5")
+
+        Returns
+        -------
+        dict
+            Configuration with keys:
+            - diameter : float
+            - temperature : float (hardcoded default for eacy)
+            - IMAGER : dict
+                Mapping of channel name ("vis"/"nir") -> channel configuration:
+                    {
+                        "pixscale_mas": float,   # filled later
+                        "dc": float,
+                        "rn": float,
+                        "cic": float,
+                        "spectral": {
+                            "wavelength": array,
+                            "optics_throughput": array,
+                            "qe": array,
+                            "dqe": array,
+                        },
+                    }
+            - IFS : dict
+                Same structure as IMAGER, from load_detector("IFS")
+        """
+        from eacy import load_telescope, load_detector, load_instrument
+
+        telescope = load_telescope(eac_keyword).__dict__
+        instrument = load_instrument("CI").__dict__
+
+        unified_config = {
+            "diameter": telescope["diam_circ"],
+            "temperature": 290.0,  # Default for eacy (not in eacy data)
+        }
+
+        # calculate pixscale from diam_circ
+        pixscale = (
+            0.5
+            * lambda_d_to_arcsec(
+                1 * LAMBDA_D,
+                0.5e-6 * LENGTH,
+                telescope["diam_circ"] * LENGTH,
+            )
+        ).to(MAS)
+        # telescope["lam"] and detector["lam"] are the same array (eacy's shared
+        # internal_lam grid) -- one wavelength array serves both optics
+        # throughput and QE, for both modes.
+        wavelengths_um = (telescope["lam"]).to(WAVELENGTH).value
+
+        telescope_throughput = np.asarray(telescope["total_tele_refl"])
+        instrument_throughput = np.asarray(instrument["total_inst_refl"])
+        combined_throughput = telescope_throughput * instrument_throughput
+
+        for obs_mode in ("IMAGER", "IFS"):
+            detector = load_detector(obs_mode).__dict__
+
+            mode_config = {}
+
+            for channel in ("vis", "nir"):
+                qe = np.atleast_1d(detector[f"qe_{channel}"])
+
+                # Channel mask: intersection of finite throughput and finite qe
+                throughput_finite = np.isfinite(combined_throughput)
+                qe_finite = np.isfinite(qe)
+                channel_mask = throughput_finite & qe_finite
+                if not channel_mask.any():
+                    raise ValueError(
+                        f"Could not determine distinct {channel} wavelength "
+                        f"domain for {eac_keyword} ({obs_mode}). No intersection "
+                        f"of finite throughput and qe_{channel} values."
+                    )
+
+                qe_masked = qe[channel_mask]
+
+                spectral = {
+                    "wavelength": list(wavelengths_um[channel_mask]),
+                    "optics_throughput": list(combined_throughput[channel_mask]),
+                    "qe": list(qe_masked),
+                    "dqe": np.ones_like(qe_masked) * DEFAULT_DQE,
+                }
+
+                mode_config[channel] = {
+                    "pixscale_mas": pixscale.value,
+                    "dc": float(detector[f"dc_{channel}"]),
+                    "rn": float(detector[f"rn_{channel}"]),
+                    "cic": 0.0,  # eacy's cic_vis/cic_nir are always None ("NOT IMPLEMENTED YET")
+                    "wavelength_range": (
+                        float(wavelengths_um[channel_mask].min()),
+                        float(wavelengths_um[channel_mask].max()),
+                    ),
+                    "spectral": spectral,
+                }
+
+            unified_config[obs_mode] = mode_config
+
+        return unified_config
+
+    @staticmethod
+    def _ingest_from_summary(eac_name="eac5"):
+        """
+        Load configuration from a self-contained YAML summary file.
+
+        The summary file (e.g. ``eac5_summary.yaml``) is produced by hwome but
+        is fully self-contained, so this path reproduces the hwome numbers
+        WITHOUT requiring the (private, non-pip-installable) hwome module. It is
+        the default source for EAC4-6.
+
+        The ``EAC_SUMMARY_DIR`` environment variable must point to a directory that
+        contains ``<eac_name>_summary.yaml``.
+
+        Returns the same unified configuration format as
+        ``_ingest_from_hwome`` / ``_convert_eacy_to_unified_format``, so it is
+        validated by ``validate_engineering_config`` and consumed identically
+        downstream. In particular, per channel:
+
+            optics_throughput = telescope x channel x FULL-filter
+
+        exactly as ``_ingest_from_hwome`` builds it (there,
+        ``prod(tp.v[:-1])`` over all optical stages including the in-wheel
+        filter). The per-channel optics therefore carry EXACTLY ONE filter
+        factor, sourced solely from ``_select_channel_filter``. Today that is
+        the FULL filter; when per-filter selection is implemented, that helper
+        will return the user-selected filter INSTEAD of FULL, so the selected
+        filter replaces FULL -- the two are never multiplied together.
+
+        Behavior:
+
+        - If ``EAC_SUMMARY_DIR`` is unset, or the file does not exist, returns
+          ``None`` so the caller can fall back to hwome.
+        - If the file exists but is malformed / missing required structure,
+          RAISES (fail loud; do not mask corrupt engineering data).
+
+        Parameters
+        ----------
+        eac_name : str, optional
+            Lower-case EAC configuration name (e.g. "eac5"). Default "eac5".
+
+        Returns
+        -------
+        dict or None
+            Unified configuration dictionary, or None if the summary is
+            unavailable (so the caller falls back to hwome).
+        """
+        import yaml
+
+        summary_dir = os.environ.get("EAC_SUMMARY_DIR")
+        if not summary_dir:
+            logger.info("EAC_SUMMARY_DIR is not set; cannot load a YAML summary file.")
+            return None
+
+        path = Path(summary_dir, f"{eac_name}_summary.yaml")
+        if not path.exists():
+            logger.info(f"YAML summary file not found at {path}")
+            return None
+
+        with open(path, "r") as fh:
+            data = yaml.safe_load(fh)
+
+        # --- local helpers -------------------------------------------------
+
+        def _curve(block, name):
+            """Return (wavelength_um, value) sorted-unique arrays from a
+            ``{wavelength: {value, unit}, value}`` block."""
+            try:
+                # wavelengths provided in nanometers
+                wl = (np.asarray(block["wavelength"]["value"], dtype=float) * u.nm).to(
+                    WAVELENGTH
+                )
+                val = np.asarray(block["value"], dtype=float)
+            except (KeyError, TypeError) as e:
+                raise ValueError(
+                    f"[{eac_name}] malformed curve for '{name}' in summary: {e}"
+                )
+            if wl.shape != val.shape or wl.size == 0:
+                raise ValueError(
+                    f"[{eac_name}] curve '{name}' has mismatched/empty "
+                    f"wavelength ({wl.size}) and value ({val.size}) arrays."
+                )
+            order = np.argsort(wl)
+            wl, val = wl[order], val[order]
+            keep = np.concatenate(([True], np.diff(wl) > 0))
+            return wl[keep], val[keep]
+
+        def _scalar(x, name):
+            """Extract a finite, non-negative float from a bare number or a
+            ``{value, unit}`` dict."""
+            v = x["value"] if isinstance(x, dict) else x
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"[{eac_name}] expected a scalar for '{name}', got {x!r}."
+                )
+            if not np.isfinite(v) or v < 0:
+                raise ValueError(
+                    f"[{eac_name}] scalar '{name}' = {v} must be finite and "
+                    f"non-negative."
+                )
+            return v
+
+        def _select_channel_filter(filters_dict, chan_name):
+            """Return the single filter block applied to this channel.
+
+            This is the ONLY source of the filter factor in optics_throughput,
+            and the isolated seam for future per-filter selection. Today it
+            returns the channel's FULL (broadband) filter.
+            """
+            full_keys = [k for k in filters_dict if "FULL" in k]
+            if not full_keys:
+                raise ValueError(
+                    f"[{eac_name}] channel '{chan_name}' has no FULL filter "
+                    f"among {list(filters_dict)}."
+                )
+            return filters_dict[full_keys[0]]
+
+        # --- physical (telescope-level) parameters -------------------------
+        try:
+            telescope = data["telescope"]
+            config = {
+                "diameter": float(telescope["circumscribing_diameter"]["value"]),  # m
+                "temperature": float(telescope["primary_temperature"]["value"]),  # K
+            }
+            tele_wl, tele_val = _curve(telescope["throughput"], "telescope")
+            channels = data["channels"]
+            detectors = data["detectors"]
+        except (KeyError, TypeError) as e:
+            raise ValueError(
+                f"[{eac_name}] summary file is missing required top-level "
+                f"structure: {e}"
+            )
+
+        # --- per-mode, per-channel ----------------------------------------
+        for obs_mode, suffix in (("IMAGER", "_DI"), ("IFS", "_IFS")):
+            mode_config = {}
+
+            for chan_name, chan in channels.items():
+                # Coronagraph (CI) channels only, matching this observing mode.
+                if chan.get("instrument") != "CI" or not chan_name.endswith(suffix):
+                    continue
+
+                chan_wl, chan_val = _curve(chan["throughput"], f"{chan_name} channel")
+
+                fblock = _select_channel_filter(chan["filters"], chan_name)
+                filter_wl, filter_val = _curve(fblock["throughput"], "filter")
+
+                mask_wl, mask_val = _curve(
+                    chan["masks"]["throughput"], f"{chan_name} mask"
+                )
+
+                center = (
+                    _scalar(fblock["center"], f"{chan_name} filter center")
+                    * u.Unit(fblock["center"]["unit"])
+                ).to(WAVELENGTH)
+                width = (
+                    _scalar(fblock["width"], f"{chan_name} filter width")
+                    * u.Unit(fblock["width"]["unit"])
+                ).to(WAVELENGTH)
+                band_min = (
+                    _scalar(chan["band_min"], f"{chan_name} band min ")
+                    * u.Unit(chan["band_min"]["unit"])
+                ).to(WAVELENGTH)
+                band_max = (
+                    _scalar(chan["band_max"], f"{chan_name} band max ")
+                    * u.Unit(chan["band_max"]["unit"])
+                ).to(WAVELENGTH)
+                lower_edge = np.maximum(center - width / 2, band_min)
+                higher_edge = np.minimum(center + width / 2, band_max)
+
+                detector = detectors[chan["detector"]]
+                qe_wl, qe_val = _curve(detector["qe"], f"{chan_name} qe")
+
+                # Restrict to the filter flat-top AND the common coverage of all
+                # curves, so interpolation never extrapolates.
+                lo = max(lower_edge, tele_wl.min(), chan_wl.min(), qe_wl.min())
+                hi = min(higher_edge, tele_wl.max(), chan_wl.max(), qe_wl.max())
+                if not (lo < hi):
+                    raise ValueError(
+                        f"[{eac_name}] channel '{chan_name}': empty wavelength "
+                        f"overlap between filter band and curve coverage."
+                    )
+
+                # Shared grid: union of native sample points strictly inside (lo, hi).
+                grid = np.unique(np.concatenate([tele_wl, chan_wl, qe_wl]))
+                grid = grid[(grid > lo) & (grid < hi)]
+                if grid.size == 0:
+                    raise ValueError(
+                        f"[{eac_name}] channel '{chan_name}': no sample points "
+                        f"inside the retained band ({lo:.4g}, {hi:.4g}) um."
+                    )
+
+                optics = (
+                    np.interp(grid, tele_wl, tele_val)
+                    * np.interp(grid, chan_wl, chan_val)
+                    * np.interp(grid, mask_wl, mask_val)
+                    * np.interp(grid, filter_wl, filter_val)
+                )
+
+                qe = np.interp(grid, qe_wl, qe_val)
+                dqe = np.full(grid.shape, _scalar(detector["dqe"], f"{chan_name} dqe"))
+
+                # Channel key: "CI_VIS_DI" -> "vis", "CI_Bridge_IFS" -> "bridge".
+                short_name = chan_name[len("CI_") : -len(suffix)].lower()
+
+                mode_config[short_name] = {
+                    "pixscale_mas": (
+                        _scalar(chan["plate_scale"], f"{chan_name} plate_scale")
+                        * ARCSEC
+                    )
+                    .to(MAS)
+                    .value,
+                    "dc": _scalar(
+                        detector["dark_current"], f"{chan_name} dark_current"
+                    ),
+                    "rn": _scalar(detector["read_noise"], f"{chan_name} read_noise"),
+                    "cic": _scalar(detector["cic"], f"{chan_name} cic"),
+                    "wavelength_range": (float(lo.value), float(hi.value)),
+                    "spectral": {
+                        "wavelength": grid,
+                        "optics_throughput": optics,
+                        "qe": qe,
+                        "dqe": dqe,
+                    },
+                }
+
+            config[obs_mode] = mode_config
+
+        return config
+
+    @staticmethod
+    def _ingest_from_hwome(eac_name="eac5"):
+        """
+        Load configuration data from hwome for a given EAC configuration.
+
+        This method replaces the deprecated eacy package with hwome for loading
+        the most up-to-date telescope, detector, and instrument configurations.
+
+        Prerequisites
+        -------------
+        Requires installation of: hwome_data, hwome-roam, hwome_core
+        Environment variable HWOME_DATA_PATH must be set to the hwome_data directory.
+
+        Parameters
+        ----------
+        eac_name : str, optional
+            Name of the EAC configuration to load (e.g., "eac5", "eac1").
+            Default is "eac5".
+
+        Returns
+        -------
+        dict
+            Configuration dictionary containing:
+            - diameter : float
+                Telescope circumscribed diameter in meters
+            - temperature : float
+                Temperature of the primary mirror
+            - IMAGER : dict
+                Mapping of channel name -> channel configuration, where each
+                channel configuration is:
+                    {
+                        "pixscale_mas": float,
+                        "dc": float,          # dark current, ct/px/s
+                        "rn": float,          # read noise
+                        "cic": float,         # clock-induced charge, ct/px
+                        "spectral": {
+                            "wavelength": array,          # in WAVELENGTH units
+                            "optics_throughput": array,
+                            "qe": array,
+                            "dqe": array,
+                        },
+                    }
+            - IFS : dict
+                Same structure as IMAGER, for spectroscopy-mode channels.
+
+        """
+
+        def _scalar_from_hwome(v, name, eac_name):
+            """Extract a single scalar float from an hwome `.v` accessor.
+
+            hwome returns scalars as single-element (masked) arrays. We take the sole
+            underlying element and convert to float. We deliberately do NOT tolerate
+            multi-element arrays or fully-masked-with-fill-value results, because those
+            would silently corrupt engineering data. If hwome's representation changes,
+            this fails loudly with a clear message rather than propagating a fill-value.
+            """
+            arr = np.ma.asarray(v)
+
+            # Guard 1: must be a single scalar, not a vector we'd silently truncate.
+            if arr.size != 1:
+                raise ValueError(
+                    f"[{eac_name}] expected a scalar for '{name}' from hwome, "
+                    f"got an array of size {arr.size}: {v!r}. hwome's data "
+                    f"representation may have changed."
+                )
+
+            # Guard 2: take the underlying data of the sole element, ignoring the mask
+            # flag (which is incidental for scalars) -- but via .data, never .filled(),
+            # so a fill-value can never masquerade as a real measurement.
+            value = float(np.ma.getdata(arr).reshape(()))
+
+            # Guard 3: the extracted number must itself be sane.
+            if not np.isfinite(value):
+                raise ValueError(
+                    f"[{eac_name}] scalar '{name}' from hwome is not finite: {value!r}."
+                )
+
+            return value
+
+        from hwome.roam.analyzer import Analyzer
+        from hwome.core.navigator import search_configuration
+
+        system = Analyzer()
+        system.load_configuration(f"{eac_name}.yaml")
+
+        nav = (
+            system.system.Mask
+        )  # generic - we could iterate all the masks, but we only need one since they don't have real values (throughput 0.99)
+        mask_name = [s.value for s in nav.name.values() if eac_name.upper() in s.value]
+        mask_name = [mask_name[0], mask_name[-1]]
+        hwo_configuration = {}
+
+        # Physical parameters (telescope-level)
+        hwo_configuration["diameter"] = float(
+            system.system.Telescope.circumscribing_diameter.q.to("m").value
+        )
+        optical_path = system.system.OpticalPath.select(
+            Instrument="CI",
+            Channel="CI_VIS_IFS",
+            Filter="CI_4F874",
+            Mask=mask_name,
+        )
+        hwo_configuration["temperature"] = float(np.median(optical_path.temperature.v))
+
+        # Load configuration for each observation type
+        for observation_type, suffix in (("IMAGER", "_DI"), ("IFS", "_IFS")):
+            configuration_by_obs = {}
+            obs_type = "di" if observation_type == "IMAGER" else "ifs"
+
+            # Search for available channels matching this observation type
+            options = search_configuration(
+                channel_type="cg_" + obs_type,
+                wavelength_range_nm=[400, 1800],
+                center_nm=None,
+            )
+
+            # Process each channel
+            for chan_name, cdict in options.items():
+
+                # locate the "FULL" channel
+                full_channel_key = [
+                    key for key in options[chan_name].keys() if "FULL" in key
+                ][0]
+
+                fdict = cdict[full_channel_key]
+
+                # Wavelength-dependent arrays
+                channel_throughput = []
+                channel_wavelength = []
+                channel_qe = []
+
+                parts = fdict["path"].split(".")
+
+                optical_path = system.system.OpticalPath.select(
+                    Instrument=parts[0],
+                    Channel=parts[1],
+                    Filter=parts[-1],
+                    Mask=mask_name,
+                )
+
+                tp = optical_path.throughput(
+                    include_detector=True, include_contamination=True
+                )
+
+                # Separate optical throughput from detector QE
+                optical_throughput = np.prod(
+                    tp.v[:-1], axis=0
+                )  # Use [:-1] to not include the detector QE which is always last
+                qe = tp.v[-1]
+
+                lower_edge = np.maximum(
+                    (fdict["center"] - fdict["width"] / 2),
+                    optical_path.Channel.band_min.q,
+                )
+                higher_edge = np.minimum(
+                    (fdict["center"] + fdict["width"] / 2),
+                    optical_path.Channel.band_max.q,
+                )
+                mask = (tp.w > lower_edge) & (tp.w < higher_edge)
+
+                channel_throughput.extend(list(optical_throughput[mask]))
+                channel_wavelength.extend(list(tp.w[mask].to(WAVELENGTH).value))
+                channel_qe.extend(list(qe[mask]))
+
+                spectral = {
+                    "wavelength": np.asarray(channel_wavelength),
+                    "optics_throughput": np.asarray(channel_throughput),
+                    "qe": np.asarray(channel_qe),
+                    "dqe": np.ones_like(np.asarray(channel_qe))
+                    * DEFAULT_DQE,  # hardcoded for now
+                }
+
+                # Retrieve scalar parameters for this channel
+                nav_chan = system.resolve("CI." + chan_name)
+
+                short_name = chan_name[len("CI_") : -len(suffix)].lower()
+                configuration_by_obs[short_name] = {
+                    "pixscale_mas": float(
+                        (
+                            _scalar_from_hwome(
+                                nav_chan.Detector.pixel_pitch.v, "pixel_pitch", eac_name
+                            )
+                            / _scalar_from_hwome(
+                                nav_chan.focal_length.v, "focal_length", eac_name
+                            )
+                            * u.radian
+                        )
+                        .to(u.mas)
+                        .value
+                    ),
+                    "dc": _scalar_from_hwome(
+                        nav_chan.Detector.dark_current.v, "dark_current", eac_name
+                    ),  # ct/px/s
+                    "rn": _scalar_from_hwome(
+                        nav_chan.Detector.read_noise.v, "read_noise", eac_name
+                    ),
+                    "cic": _scalar_from_hwome(
+                        nav_chan.Detector.cic.v, "cic", eac_name
+                    ),  # ct/px
+                    "wavelength_range": (
+                        float(lower_edge.to(WAVELENGTH).value),
+                        float(higher_edge.to(WAVELENGTH).value),
+                    ),
+                    "spectral": spectral,
+                }
+
+            hwo_configuration[observation_type] = configuration_by_obs
+
+        return hwo_configuration
+
+    def validate_engineering_config(
+        config: dict,
+        eac_keyword: str,
+    ) -> None:
+        """
+        Validate a unified engineering configuration dict (from hwome or eacy).
+
+        Channel names (e.g., "vis"/"nir", or hwome's native channel names) are
+        not hardcoded: each mode ("IMAGER"/"IFS") only needs to define at least
+        one channel, and whatever channels are present get validated.
+
+        Parameters
+        ----------
+        config : dict
+            Unified engineering configuration, as returned by
+            Observatory._ingest_from_hwome or Observatory._convert_eacy_to_unified_format.
+        eac_keyword : str
+            EAC configuration keyword (e.g., "EAC1", "EAC5"), used in error messages.
+
+        Raises
+        ------
+        ValueError
+            If the config is missing required structure, contains invalid data,
+            or is otherwise internally inconsistent (e.g. wavelength_range not
+            matching the channel's actual spectral domain).
+        TypeError
+            If a required field has an incorrect type.
+        """
+
+        def _get_channels(sub: dict, context: str) -> list:
+            """
+            Return the list of channel names present under a mode dict, requiring
+            that at least one channel is defined. Does not assume any specific
+            channel names (e.g. "vis"/"nir") -- whatever is there gets validated.
+            """
+            if not isinstance(sub, dict) or len(sub) == 0:
+                raise ValueError(
+                    f"{context} must define at least one channel (e.g. 'vis', 'nir', or "
+                    f"whatever channel names the ingestion source provides), but got: {sub!r}."
+                )
+            return list(sub.keys())
+
+        def _validate_spectral(
+            spectral: dict,
+            context: str,
+            value_keys: tuple,
+        ) -> np.ndarray:
+            """
+            Validate a channel's "spectral" sub-dict: a single shared "wavelength"
+            array plus one flat array per key in ``value_keys``. Checks presence,
+            matching lengths, finiteness, monotonicity of wavelength, and
+            (for unity-bounded keys) that values lie within [0, 1].
+
+            Returns the wavelength array so callers can reuse it (e.g. to check
+            consistency with a stored wavelength_range).
+            """
+            if "wavelength" not in spectral:
+                raise ValueError(f"{context} missing 'wavelength'.")
+
+            wl = np.asarray(spectral["wavelength"], dtype=float)
+
+            if wl.size == 0:
+                raise ValueError(f"{context} has empty 'wavelength' array.")
+            if not np.all(np.isfinite(wl)):
+                raise ValueError(f"{context}: 'wavelength' contains NaN/Inf values.")
+            if not np.all(np.diff(wl) > 0):
+                raise ValueError(f"{context}: 'wavelength' is not strictly increasing.")
+
+            for val_key in value_keys:
+                if val_key not in spectral:
+                    raise ValueError(f"{context} missing '{val_key}'.")
+
+                val = np.asarray(spectral[val_key], dtype=float)
+
+                if val.size == 0:
+                    raise ValueError(f"{context}: '{val_key}' array is empty.")
+                if val.shape != wl.shape:
+                    raise ValueError(
+                        f"{context}: 'wavelength' (len={wl.size}) and '{val_key}' "
+                        f"(len={val.size}) length mismatch."
+                    )
+                if not np.all(np.isfinite(val)):
+                    raise ValueError(f"{context}: '{val_key}' contains NaN/Inf values.")
+
+                if val.min() < 0.0 or val.max() > 1.0:
+                    raise ValueError(
+                        f"{context}: '{val_key}' values must lie within [0, 1] "
+                        f"(got min={val.min():.4g}, max={val.max():.4g}). "
+                        f"A value outside this range likely indicates corrupted upstream "
+                        f"data or a units/scaling bug in the ingestion source."
+                    )
+
+            return wl
+
+        def _validate_wavelength_range(
+            wavelength_range,
+            wl: np.ndarray,
+            context: str,
+            rel_tol: float = 1e-6,
+        ) -> None:
+            """
+            Validate that ``wavelength_range`` is a well-formed (min, max) pair,
+            and that it is consistent with the channel's actual discretized
+            "spectral" wavelength domain (wl) -- i.e. wl should lie within
+            [wavelength_range[0], wavelength_range[1]], within a small floating-
+            point tolerance.
+            """
+            if (
+                not isinstance(wavelength_range, (tuple, list))
+                or len(wavelength_range) != 2
+            ):
+                raise ValueError(
+                    f"{context}: 'wavelength_range' must be a 2-element (min, max) "
+                    f"pair, got: {wavelength_range!r}."
+                )
+
+            lo, hi = wavelength_range
+            if not isinstance(lo, (int, float)) or not isinstance(hi, (int, float)):
+                raise TypeError(
+                    f"{context}: 'wavelength_range' elements must be numeric, "
+                    f"got: {wavelength_range!r}."
+                )
+            if not (np.isfinite(lo) and np.isfinite(hi)):
+                raise ValueError(
+                    f"{context}: 'wavelength_range' contains NaN/Inf: {wavelength_range!r}."
+                )
+            if lo >= hi:
+                raise ValueError(
+                    f"{context}: 'wavelength_range' min ({lo}) must be strictly "
+                    f"less than max ({hi})."
+                )
+
+            tol = rel_tol * max(abs(hi), abs(lo), 1.0)
+            if wl.min() < lo - tol or wl.max() > hi + tol:
+                raise ValueError(
+                    f"{context}: 'wavelength_range' = [{lo:.6g}, {hi:.6g}] does not "
+                    f"contain the channel's actual spectral domain "
+                    f"[{wl.min():.6g}, {wl.max():.6g}]. "
+                )
+
+        if config is None:
+            raise ValueError(
+                f"Engineering configuration for '{eac_keyword}' failed to load "
+                f"(hwome and eacy both returned None). Check hwome/eacy availability "
+                f"and HWOME_DATA_PATH."
+            )
+
+        REQUIRED_TOP_LEVEL = {
+            "diameter": (float, int),
+            "temperature": (float, int),
+            "IMAGER": dict,
+            "IFS": dict,
+        }
+
+        # Keys required inside each channel's config (in addition to "spectral")
+        REQUIRED_CHANNEL_SCALAR_KEYS = ["dc", "rn", "cic"]
+
+        # Keys required inside each channel's "spectral" sub-dict
+        REQUIRED_SPECTRAL_VALUE_KEYS = ("optics_throughput", "qe", "dqe")
+
+        # --- top-level keys/types ---
+        for key, expected_type in REQUIRED_TOP_LEVEL.items():
+            if key not in config:
+                raise ValueError(
+                    f"[{eac_keyword}] engineering config missing required key '{key}'."
+                )
+            if not isinstance(config[key], expected_type):
+                raise TypeError(
+                    f"[{eac_keyword}] '{key}' expected {expected_type}, "
+                    f"got {type(config[key])}."
+                )
+
+        if not (0 < config["diameter"] < 100):
+            raise ValueError(
+                f"[{eac_keyword}] 'diameter' = {config['diameter']} m looks unphysical."
+            )
+        if not (0 < config["temperature"] < 1000):
+            raise ValueError(
+                f"[{eac_keyword}] 'temperature' = {config['temperature']} K looks unphysical."
+            )
+
+        # --- per-mode structure ---
+        for mode in ("IMAGER", "IFS"):
+            mode_config = config[mode]
+
+            channels = _get_channels(mode_config, context=f"[{eac_keyword}][{mode}]")
+
+            for chan_name in channels:
+                chan_config = mode_config[chan_name]
+                context = f"[{eac_keyword}][{mode}]['{chan_name}']"
+
+                if not isinstance(chan_config, dict):
+                    raise TypeError(
+                        f"{context} must be a dict, got {type(chan_config)}."
+                    )
+
+                # --- scalar detector parameters ---
+                for skey in REQUIRED_CHANNEL_SCALAR_KEYS:
+                    if skey not in chan_config:
+                        raise ValueError(f"{context} missing required key '{skey}'.")
+                    val = chan_config[skey]
+                    if (
+                        not isinstance(val, (int, float))
+                        or not np.isfinite(val)
+                        or val < 0
+                    ):
+                        raise ValueError(
+                            f"{context}['{skey}'] = {val} must be a finite, non-negative number."
+                        )
+
+                # --- pixscale_mas ---
+                if "pixscale_mas" not in chan_config:
+                    raise ValueError(f"{context} missing required key 'pixscale_mas'.")
+                pixscale = chan_config["pixscale_mas"]
+
+                if (
+                    not isinstance(pixscale, (int, float))
+                    or not np.isfinite(pixscale)
+                    or pixscale <= 0
+                ):
+                    raise ValueError(
+                        f"{context}['pixscale_mas'] = {pixscale} must be a finite, positive number."
+                    )
+
+                # --- wavelength_range + spectral data ---
+                if "spectral" not in chan_config:
+                    raise ValueError(f"{context} missing required key 'spectral'.")
+                if "wavelength_range" not in chan_config:
+                    raise ValueError(
+                        f"{context} missing required key 'wavelength_range'."
+                    )
+
+                wl = _validate_spectral(
+                    chan_config["spectral"],
+                    context=f"{context}['spectral']",
+                    value_keys=REQUIRED_SPECTRAL_VALUE_KEYS,
+                )
+
+                _validate_wavelength_range(
+                    chan_config["wavelength_range"],
+                    wl,
+                    context=context,
+                )
+
     def load_configuration(
         self, parameters: dict, observation: object, scene: object
     ) -> None:
@@ -316,14 +1202,86 @@ class Observatory(ABC):  # abstract class
         # Creates a mediator that picks selected variables from other classes
         mediator = ObservatoryMediator(self, observation, scene)
 
-        self.coronagraph.load_configuration(parameters, mediator)
+        # Select active channel
+        if self.configuration is not None:
+            obs_mode = parameters["observing_mode"]
+            self.active_channel = Observatory._select_active_channel(
+                self.configuration[obs_mode], observation.wavelength_range
+            )
+        else:
+            self.active_channel = None
         self.telescope.load_configuration(parameters, mediator)
+        self.coronagraph.load_configuration(parameters, mediator)
         self.detector.load_configuration(parameters, mediator)
         self.observing_mode = parameters["observing_mode"]  # IFS or IMAGER
 
         self.calculate_optics_throughput(parameters, mediator)
         self.calculate_warmemissivity_coldtransmission(parameters, mediator)
         self.calculate_total_throughput()
+
+    @staticmethod
+    def _select_active_channel(mode_config, wavelength_range):
+        """
+        Determine which single channel's engineering data applies to filter_obj.
+
+        Parameters
+        ----------
+        mode_config : dict
+            The per-mode unified configuration dict (e.g. eac_config["IFS"]),
+            mapping chan_name -> channel configuration. Each channel
+            configuration must contain a "wavelength_range" tuple
+            (min, max) in WAVELENGTH's native units, defining the channel's
+            valid native domain.
+        wavelength_range : np.array
+            The active observation wavelength range.
+
+        Returns
+        -------
+        str
+            The selected channel name.
+
+        Raises
+        ------
+        ValueError
+            If no channel (or more than one channel) fully contains the
+            filter's wavelength range.
+        """
+        domain_matches = []
+        channel_ranges = {}
+        for chan_name, chan_config in mode_config.items():
+            wl_min, wl_max = chan_config["wavelength_range"]
+            channel_ranges[chan_name] = (wl_min, wl_max)
+            if (
+                wavelength_range[0].value >= wl_min
+                and wavelength_range[1].value <= wl_max
+            ):
+                domain_matches.append(chan_name)
+
+        if not domain_matches:
+            channel_info = ", ".join(
+                [
+                    f"{name}: [{edges[0]:.3f}, {edges[1]:.3f}]"
+                    for name, edges in channel_ranges.items()
+                ]
+            )
+            raise ValueError(
+                f"Wavelength range [{wavelength_range[0].value:.3f}, {wavelength_range[1].value:.3f}] does not fall "
+                f"entirely within any channel's native wavelength domain. "
+                f"Available channels: {channel_info}."
+            )
+        if len(domain_matches) > 1:
+            matching_info = ", ".join(
+                [
+                    f"{name}: [{channel_ranges[name][0]:.3f}, {channel_ranges[name][1]:.3f}]"
+                    for name in domain_matches
+                ]
+            )
+            raise ValueError(
+                f"Wavelength range [{wavelength_range[0].value:.3f}, {wavelength_range[1].value:.3f}] spans multiple "
+                f"channels: {matching_info}. Please define separate filters, "
+                f"each contained within a single instrument channel."
+            )
+        return domain_matches[0]
 
     def validate_configuration(self) -> None:
         """
@@ -350,7 +1308,7 @@ class Observatory(ABC):  # abstract class
 
         # Observatory-related args
         expected_args = {
-            "total_throughput": QUANTUM_EFFICIENCY,
+            "total_throughput": QUANTUM_EFFICIENCY,  # technically, already multiplied by QE terms TODO extrapolate terms
             "optics_throughput": DIMENSIONLESS,
             "epswarmTrcold": DIMENSIONLESS,
         }
@@ -392,11 +1350,47 @@ class Observatory(ABC):  # abstract class
             logger.info("Calculating optics_throughput from input...")
             self.optics_throughput = parameters["T_optical"] * DIMENSIONLESS
         else:
-            logger.info("Calculating optics throughput from preset...")
-            self.optics_throughput = (
-                self.telescope.telescope_optical_throughput
-                * self.coronagraph.coronagraph_optical_throughput
-            )
+            logger.info("Calculating optics throughput from EAC YAML files...")
+            eac_config = mediator.get_eac_configuration()
+            if eac_config is not None:
+                obs_mode = mediator.get_observation_parameter("observing_mode")
+                mode_config = eac_config[obs_mode]
+                active_channel = mediator.get_active_channel()
+                channel_config = mode_config[active_channel]
+
+                # BIN CONFIGURATION DATA TO WAVELENGTH OF INTEREST
+                curve_keys = ["optics_throughput"]
+                rebinned = utils.rebin_channel_curves_to_grid(
+                    channel_config["spectral"],
+                    curve_keys,
+                    to_wavelength=mediator.get_observation_parameter(
+                        "wavelength"
+                    ).value,
+                    to_delta_wavelength=(
+                        mediator.get_observation_parameter("delta_wavelength").value
+                        if mediator.get_observation_parameter("delta_wavelength")
+                        is not None
+                        else None
+                    ),
+                    interpolation=(
+                        "Gaussian"
+                        if mediator.get_observation_parameter("delta_wavelength")
+                        is not None
+                        else "1d"
+                    ),
+                    obs_mode=obs_mode,
+                    wavelength_range=mediator.get_observation_parameter(
+                        "wavelength_range"
+                    ),
+                )
+
+                self.optics_throughput = (
+                    np.asarray(rebinned["optics_throughput"]) * DIMENSIONLESS
+                )
+            else:
+                raise ValueError(
+                    "Could not calculate optics throughput from the YAML files."
+                )
 
         if parameters["observing_mode"] == "IFS":
             # multiply by the IFS efficiency if in spectroscopy mode
@@ -454,7 +1448,8 @@ class Observatory(ABC):  # abstract class
 
     def calculate_total_throughput(self) -> None:
         """
-        Calculate the total system throughput.
+        Calculate the total system throughput, i.e. the dimensionless end-to-end
+        efficiency including detector QE and dQE.
 
         This method computes the combined optical and detector throughput by
         multiplying the optics throughput with the detector quantum efficiency (QE),
@@ -587,3 +1582,29 @@ class ObservatoryMediator:
             The parameter value if it exists, None otherwise
         """
         return getattr(self.scene, param_name, None)
+
+    def get_eac_configuration(self):
+        """
+        Retrieve the EAC configuration from the observatory.
+
+        This returns the unified configuration dictionary that may have been
+        loaded from hwome (EAC4-6) or eacy (EAC1-3), in a consistent format.
+
+        Returns
+        -------
+        dict or None
+            The EAC configuration dictionary if available, None otherwise
+        """
+        return getattr(self.observatory, "configuration", None)
+
+    def get_active_channel(self):
+        """
+        Retrieve the currently selected instrument channel name for the
+        active filter, as resolved once by Observatory.load_configuration.
+
+        Returns
+        -------
+        str or None
+            The active channel name, or None if not using an EAC configuration.
+        """
+        return getattr(self.observatory, "active_channel", None)
