@@ -125,7 +125,7 @@ def main():
         if args.ref_lambda is None:
             raise ValueError(
                 "etc2snr requires --ref_lambda to specify the reference "
-                "wavelength(s)."
+                "wavelength."
             )
 
         reference = float(args.ref_lambda)
