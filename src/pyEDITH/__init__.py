@@ -103,6 +103,9 @@ def set_verbosity(level="warning"):
         h.setLevel(log_level)
 
 
+if not logging.getLogger().handlers:
+    logging.getLogger().addHandler(logging.NullHandler())
+
 from .astrophysical_scene import AstrophysicalScene
 from .observation import Observation
 from .observatory import Observatory

@@ -1057,7 +1057,7 @@ def test_fill_parameters_locked_keys_prevent_override(test_object, caplog):
     }
     locked_keys = {"locked_param"}
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
         fill_parameters(test_object, parameters, default_parameters, locked_keys)
 
     # Locked parameter should retain default value
@@ -1132,7 +1132,7 @@ def test_fill_parameters_mixed_locked_and_unlocked_quantities(test_object, caplo
     }
     locked_keys = {"locked_distance"}
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
         fill_parameters(test_object, parameters, default_parameters, locked_keys)
 
     # Locked should use default
@@ -1172,7 +1172,7 @@ def test_fill_parameters_all_locked_keys(test_object, caplog):
     }
     locked_keys = {"param1", "param2"}
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
         fill_parameters(test_object, parameters, default_parameters, locked_keys)
 
     # All should use defaults
@@ -1199,7 +1199,7 @@ def test_fill_parameters_override_locked_key(test_object, caplog):
     locked_keys = {"locked_param"}
     allow_override = {"locked_param"}
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
         fill_parameters(
             test_object, parameters, default_parameters, locked_keys, allow_override
         )
@@ -1222,7 +1222,7 @@ def test_fill_parameters_override_locked_quantity(test_object, caplog):
     locked_keys = {"locked_distance"}
     allow_override = {"locked_distance"}
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
         fill_parameters(
             test_object, parameters, default_parameters, locked_keys, allow_override
         )
@@ -1243,7 +1243,7 @@ def test_fill_parameters_override_with_unit_conversion(test_object, caplog):
     locked_keys = {"locked_distance"}
     allow_override = {"locked_distance"}
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
         fill_parameters(
             test_object, parameters, default_parameters, locked_keys, allow_override
         )
@@ -1265,7 +1265,7 @@ def test_fill_parameters_override_without_unit(test_object, caplog):
     locked_keys = {"locked_length"}
     allow_override = {"locked_length"}
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
         fill_parameters(
             test_object, parameters, default_parameters, locked_keys, allow_override
         )
@@ -1323,7 +1323,7 @@ def test_fill_parameters_override_non_locked_key(test_object, caplog):
     locked_keys = set()
     allow_override = {"unlocked_param"}
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
         fill_parameters(
             test_object, parameters, default_parameters, locked_keys, allow_override
         )
@@ -1349,7 +1349,7 @@ def test_fill_parameters_override_mixed_locked_unlocked(test_object, caplog):
     locked_keys = {"locked_param1", "locked_param2"}
     allow_override = {"locked_param1"}
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
         fill_parameters(
             test_object, parameters, default_parameters, locked_keys, allow_override
         )
@@ -1397,7 +1397,7 @@ def test_fill_parameters_override_none_value(test_object, caplog):
     }
     locked_keys = {"locked_param"}
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
         fill_parameters(
             test_object,
             parameters,
@@ -1422,7 +1422,7 @@ def test_fill_parameters_override_without_user_parameter(test_object, caplog):
     locked_keys = {"locked_param"}
     allow_override = {"locked_param"}
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
         fill_parameters(
             test_object, parameters, default_parameters, locked_keys, allow_override
         )
@@ -1448,7 +1448,7 @@ def test_fill_parameters_override_all_locked_keys(test_object, caplog):
     locked_keys = {"locked_param1", "locked_param2", "locked_param3"}
     allow_override = {"locked_param1", "locked_param2", "locked_param3"}
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
         fill_parameters(
             test_object, parameters, default_parameters, locked_keys, allow_override
         )
@@ -1473,7 +1473,7 @@ def test_fill_parameters_override_logs_both_values(test_object, caplog):
     locked_keys = {"locked_param"}
     allow_override = {"locked_param"}
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
         fill_parameters(
             test_object, parameters, default_parameters, locked_keys, allow_override
         )
@@ -1496,7 +1496,7 @@ def test_fill_parameters_override_quantity_logs_units(test_object, caplog):
     locked_keys = {"locked_distance"}
     allow_override = {"locked_distance"}
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
         fill_parameters(
             test_object, parameters, default_parameters, locked_keys, allow_override
         )
@@ -1570,7 +1570,7 @@ def test_fill_parameters_rebin_array_override(test_object, caplog):
     locked_keys = {"DC"}
     allow_override = {"DC"}
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.INFO, logger="pyEDITH"):
         fill_parameters(
             test_object,
             parameters,
@@ -1603,7 +1603,7 @@ def test_fill_parameters_skip_scalar_override(test_object, caplog):
     locked_keys = {"diameter"}
     allow_override = {"diameter"}
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.INFO, logger="pyEDITH"):
         fill_parameters(
             test_object,
             parameters,
@@ -1635,7 +1635,7 @@ def test_fill_parameters_mixed_overrides(test_object, caplog):
     locked_keys = {"DC", "diameter"}
     allow_override = {"DC", "diameter"}
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.INFO, logger="pyEDITH"):
         fill_parameters(
             test_object,
             parameters,
@@ -1673,7 +1673,7 @@ def test_fill_parameters_mixed_overrides_non_quantities(test_object, caplog):
     locked_keys = {"DC", "diameter"}
     allow_override = {"DC", "diameter"}
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.INFO, logger="pyEDITH"):
         fill_parameters(
             test_object,
             parameters,
@@ -1737,7 +1737,7 @@ def test_fill_parameters_override_not_provided(test_object, caplog):
     locked_keys = {"DC"}
     allow_override = {"DC"}
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.INFO, logger="pyEDITH"):
         fill_parameters(
             test_object,
             parameters,
@@ -1751,35 +1751,3 @@ def test_fill_parameters_override_not_provided(test_object, caplog):
     assert np.array_equal(test_object.DC, default_parameters["DC"])
     # No rebinning message for DC
     assert "Before overriding: rebinning DC" not in caplog.text
-
-
-# def test_fill_parameters_step0_integration_with_step1(test_object, caplog):
-#     """Test that rebinned DC from STEP 0 is correctly applied as override in STEP 1."""
-#     parameters = {
-#         "wavelength": np.array([500, 600, 700]) * u.nm,
-#         "DC": np.array([1e-3, 2e-3, 1.5e-3]) * u.electron / u.s / u.pix,
-#     }
-#     rebinned_wavelength = np.array([500, 550, 600, 650, 700]) * u.nm
-#     default_parameters = {
-#         "wavelength": np.array([500, 600, 700]) * u.nm,
-#         "DC": 1e-3 * u.electron / u.s / u.pix,
-#     }
-#     locked_keys = {"DC"}
-#     allow_override = {"DC"}
-
-#     with caplog.at_level(logging.WARNING):
-#         fill_parameters(
-#             test_object,
-#             parameters,
-#             default_parameters,
-#             locked_keys,
-#             allow_override,
-#             rebinned_wavelength,
-#         )
-
-#     # Check that DC was rebinned then applied as override
-#     assert len(test_object.DC) == len(rebinned_wavelength)
-#     assert isinstance(test_object.DC, u.Quantity)
-#     assert test_object.DC.unit == u.electron / u.s / u.pix
-#     # Should see the override warning from STEP 1
-#     assert "explicitly overridden" in caplog.text

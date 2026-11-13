@@ -48,6 +48,8 @@ include-package-data = true
 pyedith = "pyEDITH.cli:main"
 
 [tool.pytest.ini_options]
+python_files = ["test_*.py", "*_test.py", "integration_tests*.py"]
+
 addopts = "-ra --cov=pyEDITH --cov-report=html --cov-report=term-missing --cov-branch"
 markers = [
     "integration: full-pipeline smoke/integration tests that load real EAC data (slow; deselect with -m 'not integration')",

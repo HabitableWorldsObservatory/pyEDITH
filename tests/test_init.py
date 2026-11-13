@@ -179,11 +179,11 @@ def test_pyedith_logger_handler_is_stream_handler():
 
 
 def test_pyedith_logger_formatter_is_colored():
-    """Check that pyedith_logger uses ColoredFormatter."""
-    from pyEDITH import pyedith_logger, ColoredFormatter
+    from pyEDITH import pyedith_logger
 
     handlers = pyedith_logger.handlers
-    assert any(isinstance(h.formatter, ColoredFormatter) for h in handlers)
+    # Check by name to avoid module-reload identity issues
+    assert any(type(h.formatter).__name__ == "ColoredFormatter" for h in handlers)
 
 
 def test_pyedith_logger_propagate_true():
