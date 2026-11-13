@@ -124,8 +124,7 @@ def main():
 
         if args.ref_lambda is None:
             raise ValueError(
-                "etc2snr requires --ref_lambda to specify the reference "
-                "wavelength."
+                "etc2snr requires --ref_lambda to specify the reference " "wavelength."
             )
 
         reference = float(args.ref_lambda)
@@ -306,7 +305,6 @@ def _get_closest_finite_time(wvl_array, exptime_array, ref_wav):
     if not np.isfinite(t_val):
         raise ValueError(
             f"Exposure time at the wavelength closest to {ref_wav} is infinite. "
-            "This usually indicates zero transmission at this wavelength."
         )
     return t_val, wvl_array[idx]
 
