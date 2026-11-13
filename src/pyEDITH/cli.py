@@ -203,9 +203,7 @@ def calculate_texp(parameters: dict, ETC_validation: bool = False) -> tuple[dict
     return results, validation_variables
 
 
-def calculate_snr(
-    parameters: dict, reference_texp: Union[float, dict]
-) -> tuple[dict, dict]:
+def calculate_snr(parameters: dict, reference_texp: float) -> tuple[dict, dict]:
     """
     Calculate signal-to-noise ratio for a given exposure time.
 
@@ -217,10 +215,8 @@ def calculate_snr(
     ----------
     parameters : dict
         Dictionary containing all input parameters for the calculation
-    reference_texp : float or dict
-        Reference exposure time. If a scalar, the same time is applied to all
-        filters (coupled mode). If a dict mapping filter names to times, each
-        filter uses its own time (independent mode).
+    reference_texp : float
+        Reference exposure time.
 
     Returns
     -------
@@ -256,15 +252,7 @@ def calculate_snr(
         observatory.load_configuration(parameters, observation, scene)
         observatory.validate_configuration()
 
-        # Handle independent times (dict) vs coupled time (scalar)
-        if isinstance(reference_texp, dict):
-            if f.name not in reference_texp:
-                raise KeyError(
-                    f"Filter '{f.name}' not found in the provided exposure time dict."
-                )
-            observation.obstime = reference_texp[f.name]
-        else:
-            observation.obstime = reference_texp
+        observation.obstime = reference_texp
 
         calculate_exposure_time_or_snr(
             observation, scene, observatory, mode="signal_to_noise"

@@ -256,8 +256,6 @@ def test_workflow_etc2snr():
         params, reference_wavelength=0.5
     )
 
-    # The driving time is now a single shared scalar Quantity (not a per-filter
-    # dict -- that was the artefact of the removed independent mode).
     assert isinstance(texp, u.Quantity)
     assert np.isfinite(texp.to(u.s).value) and texp.to(u.s).value > 0
 

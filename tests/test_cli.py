@@ -564,57 +564,6 @@ def test_calculate_snr_ifs_mode_with_regridding(mock_parameters_ifs):
 
 
 # ============================================================================
-# Tests for calculate_snr() - dict (independent) time dispatch
-# ============================================================================
-
-
-def test_calculate_snr_accepts_dict_of_times(mock_parameters):
-    """Test that calculate_snr maps a dict of times onto the matching filter."""
-    with (
-        patch("pyEDITH.cli.Observation") as mock_observation,
-        patch("pyEDITH.cli.AstrophysicalScene") as mock_scene,
-        patch("pyEDITH.cli.Observatory") as mock_observatory,
-        patch("pyEDITH.cli.calculate_exposure_time_or_snr"),
-    ):
-        mock_observation_instance = MagicMock()
-        mock_observation_instance.fullsnr = np.array([10.0])
-        mock_observation_instance.validation_variables = {}
-        mock_observation.return_value = mock_observation_instance
-        mock_scene.return_value = MagicMock()
-        mock_observatory.return_value = MagicMock()
-
-        filter_name = mock_parameters["filter_list"][0].name
-        times_dict = {filter_name: 42.0}
-
-        snr, _ = calculate_snr(mock_parameters, times_dict)
-
-        # The scalar time for this specific filter must have been assigned
-        assert mock_observation_instance.obstime == 42.0
-        assert filter_name in snr
-
-
-def test_calculate_snr_dict_missing_filter_raises(mock_parameters):
-    """Test that calculate_snr raises KeyError if a filter is absent from the time dict."""
-    with (
-        patch("pyEDITH.cli.Observation") as mock_observation,
-        patch("pyEDITH.cli.AstrophysicalScene") as mock_scene,
-        patch("pyEDITH.cli.Observatory") as mock_observatory,
-        patch("pyEDITH.cli.calculate_exposure_time_or_snr"),
-    ):
-        mock_observation.return_value = MagicMock()
-        mock_scene.return_value = MagicMock()
-        mock_observatory.return_value = MagicMock()
-
-        # Provide a dict that does NOT contain the real filter name
-        times_dict = {"NonExistentFilter": 42.0}
-
-        with pytest.raises(
-            KeyError, match="not found in the provided exposure time dict"
-        ):
-            calculate_snr(mock_parameters, times_dict)
-
-
-# ============================================================================
 # Tests for _get_closest_finite_time()
 # ============================================================================
 
@@ -687,8 +636,7 @@ def test_reference_snr_coupled_orchestration(
     and broadcast across all filters.
 
     NOTE: etc2snr now requires >=2 filters, so this uses the two-filter fixture.
-    The driving time is returned as a SCALAR (not a per-filter dict -- that was
-    the artefact of the removed independent mode).
+    The driving time is returned as a SCALAR.
     """
     mock_texp.return_value = (
         {
@@ -785,15 +733,12 @@ def test_workflow_etc2snr_coupled(toymodel_two_filter_params):
 
     Exercises the real engine. The reference band (blue, 0.5 um) must recover
     the target SNR (7.0); the other band (red), evaluated at the SAME time, must
-    NOT -- that non-recovery is the whole point of coupling, and its presence is
-    what distinguishes this from the removed (vacuous) independent mode.
+    NOT.
     """
     snrs, texp, _ = calculate_snr_from_reference_lambda(
         toymodel_two_filter_params, reference_wavelength=0.5
     )
 
-    # The driving time is a single shared scalar Quantity (not a per-filter dict
-    # -- that was the artefact of the removed independent mode).
     assert isinstance(texp, u.Quantity)
     assert np.isfinite(texp.to(u.s).value) and texp.to(u.s).value > 0
 
@@ -805,9 +750,6 @@ def test_workflow_etc2snr_coupled(toymodel_two_filter_params):
         err_msg="Reference band (blue) should recover the target SNR of 7.0.",
     )
 
-    # Non-reference band is evaluated at blue's time and must differ. If it also
-    # recovered 7.0, coupling would be computing a tautology -- the very vacuity
-    # we removed with independent mode. This assertion is that mode's epitaph.
     assert np.all(np.isfinite(snrs["red"]["snr"].value))
     assert not np.allclose(snrs["red"]["snr"].value, 7.0, rtol=1e-3), (
         "Red band recovered the target SNR -- coupling is behaving like the "
