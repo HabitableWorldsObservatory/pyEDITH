@@ -327,8 +327,8 @@ class Observatory(ABC):  # abstract class
         # Creates a mediator that picks selected variables from other classes
         mediator = ObservatoryMediator(self, observation, scene)
 
-        self.coronagraph.load_configuration(parameters, mediator)
         self.telescope.load_configuration(parameters, mediator)
+        self.coronagraph.load_configuration(parameters, mediator)
         self.detector.load_configuration(parameters, mediator)
         self.observing_mode = parameters["observing_mode"]  # IFS or IMAGER
 

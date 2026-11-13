@@ -4,6 +4,7 @@ from . import utils
 import astropy.units as u
 from .units import *
 from pyEDITH import parse_input
+import copy
 
 
 class Telescope(ABC):
@@ -130,6 +131,7 @@ class ToyModelTelescope(Telescope):
 
         self.path = path
         self.keyword = keyword
+        self.DEFAULT_CONFIG = copy.deepcopy(self.DEFAULT_CONFIG)
 
     def load_configuration(self, parameters: dict, mediator: object) -> None:
         """

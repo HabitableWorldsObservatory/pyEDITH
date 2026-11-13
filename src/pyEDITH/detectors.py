@@ -4,6 +4,7 @@ from . import utils
 import astropy.units as u
 from .units import *
 from pyEDITH import parse_input
+import copy
 
 
 class Detector(ABC):
@@ -133,6 +134,7 @@ class ToyModelDetector(Detector):
         """
         self.path = path
         self.keyword = keyword
+        self.DEFAULT_CONFIG = copy.deepcopy(self.DEFAULT_CONFIG)
 
     def load_configuration(self, parameters: dict, mediator: object) -> None:
         """
@@ -182,7 +184,8 @@ class ToyModelDetector(Detector):
                 key: parse_input.normalize_list_shapes(
                     self.DEFAULT_CONFIG,
                     key,
-                    mediator.get_observation_parameter("nlambda"),
+                    len(parameters["wavelength"]),
+                    # len(mediator.get_observation_parameter("wavelength")),
                 )
                 for key in array_params
             }
