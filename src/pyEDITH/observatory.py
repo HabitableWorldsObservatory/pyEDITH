@@ -316,8 +316,8 @@ class Observatory(ABC):  # abstract class
         # Creates a mediator that picks selected variables from other classes
         mediator = ObservatoryMediator(self, observation, scene)
 
-        self.coronagraph.load_configuration(parameters, mediator)
         self.telescope.load_configuration(parameters, mediator)
+        self.coronagraph.load_configuration(parameters, mediator)
         self.detector.load_configuration(parameters, mediator)
         self.observing_mode = parameters["observing_mode"]  # IFS or IMAGER
 
@@ -390,7 +390,15 @@ class Observatory(ABC):  # abstract class
 
         if "T_optical" in parameters.keys():
             logger.info("Calculating optics_throughput from input...")
-            self.optics_throughput = parameters["T_optical"] * DIMENSIONLESS
+            rebinned = utils.resample_to_wavelength_grid(
+                parameters["T_optical"] * DIMENSIONLESS,
+                from_wavelength=parameters["wavelength"],  # input wavelength
+                to_wavelength=mediator.get_observation_parameter("wavelength").value,
+                name="T_optical",
+                interpolation="1d",
+            )  # signal to noise # nlambda array
+
+            self.optics_throughput = rebinned * DIMENSIONLESS
         else:
             logger.info("Calculating optics throughput from preset...")
             self.optics_throughput = (

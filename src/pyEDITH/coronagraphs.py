@@ -8,11 +8,12 @@ from yippy import Coronagraph as yippycoro
 from lod_unit import lod
 import logging
 from pyEDITH import parse_input
+import copy
 
 logger = logging.getLogger("pyEDITH")
 
 
-def generate_radii(numx: int, numy: int = 0) -> np.ndarray:
+def _generate_radii(numx: int, numy: int = 0) -> np.ndarray:
     """
     Generate a 2D distribution of radii from the center of a matrix.
 
@@ -104,7 +105,7 @@ class Coronagraph(ABC):
 
     This class defines the basic structure and methods common to all coronagraphs.
     Specific coronagraph models should inherit from this class and implement
-    their own `generate_secondary_parameters` method.
+    their own methods.
     Right now, there are two coronagraph sub-classes:
 
         -> **ToyModelCoronagraph**
@@ -152,6 +153,8 @@ class Coronagraph(ABC):
         Number of roll angles.
     coronagraph_optical_throughput: np.ndarray
         Throughput for all coronagraph optics in the optical path
+    coronagraph_spectral_resolution: np.ndarray
+        Spectral resolution of the coronagraph.
     """
 
     # Keys that a user is NOT allowed to override for this coronagraph mode.
@@ -249,8 +252,7 @@ class ToyModelCoronagraph(Coronagraph):
         "photometric_aperture_radius": 0.85 * LAMBDA_D,
         "Tcore": 0.2968371
         * DIMENSIONLESS,  # core throughput of coronagraph (uniform over dark hole, unitless, scalar)
-        "TLyot": 0.65
-        * DIMENSIONLESS,  # Lyot transmission of the coronagraph and the factor of 1.6 is just an estimate, used for skytrans
+        "TLyot": 0.65 * DIMENSIONLESS,  # Lyot transmission of the coronagraph
         "nrolls": 1,  # number of rolls
         "coronagraph_optical_throughput": [0.44]
         * DIMENSIONLESS,  # Coronagraph throughput [made up from EAC1-ish]
@@ -268,6 +270,7 @@ class ToyModelCoronagraph(Coronagraph):
             Path to configuration files (not used in toy model)
         """
         self.path = path
+        self.DEFAULT_CONFIG = copy.deepcopy(self.DEFAULT_CONFIG)
 
     def load_configuration(self, parameters: dict, mediator: object) -> None:
         """
@@ -292,7 +295,7 @@ class ToyModelCoronagraph(Coronagraph):
             self, parameters, self.DEFAULT_CONFIG, locked_keys=self.LOCKED_KEYS
         )
 
-        # Convert to numpy array when appropriate
+        # # Convert to numpy array when appropriate
         array_params = ["coronagraph_optical_throughput"]
         utils.convert_to_numpy_array(self, array_params)
 
@@ -303,7 +306,7 @@ class ToyModelCoronagraph(Coronagraph):
         self.ycenter = self.npix / 2.0 * PIXEL
 
         self.r = (
-            generate_radii(self.npix, self.npix) * self.pixscale
+            _generate_radii(self.npix, self.npix) * self.pixscale
         )  # create an array of circumstellar separations in units of lambd/D centered on star
 
         self.omega_lod = (
@@ -452,6 +455,7 @@ class CoronagraphYIP(Coronagraph):
 
         self.path = path
         self.yippy_coro = yippy_coro
+        self.DEFAULT_CONFIG = copy.deepcopy(self.DEFAULT_CONFIG)
 
     def load_configuration(self, parameters: dict, mediator: object) -> None:
         """
@@ -519,7 +523,9 @@ class CoronagraphYIP(Coronagraph):
             )
 
         # Prefer psf_trunc_ratio if both are provided
-        if psf_trunc is not None:
+        use_trunc_ratio = psf_trunc is not None  # flag for later
+
+        if use_trunc_ratio:
             self.psf_trunc_ratio = psf_trunc * DIMENSIONLESS
             if phot_aperture is not None:
                 logger.warning(
@@ -527,16 +533,10 @@ class CoronagraphYIP(Coronagraph):
                     "Using 'psf_trunc_ratio' and ignoring 'photometric_aperture_radius'."
                 )
             self.photometric_aperture_radius = None
+            obs_trunc_float = float(self.psf_trunc_ratio)  # Fed to YIPPY
         else:
             self.psf_trunc_ratio = None
             self.photometric_aperture_radius = phot_aperture * LAMBDA_D
-
-        # ***** Load the YIP using yippy *****
-        obs_trunc_ratio = self.psf_trunc_ratio
-        if obs_trunc_ratio is not None:
-            # Strip units so yippy receives a plain float
-            obs_trunc_float = float(obs_trunc_ratio)
-        else:
             obs_trunc_float = None
 
         if self.yippy_coro is not None:
@@ -594,9 +594,9 @@ class CoronagraphYIP(Coronagraph):
         # Separation grid from yippy (replaces generate_radii)
         self.DEFAULT_CONFIG["r"] = yippy_obj.separation_map() * LAMBDA_D
 
-        self.DEFAULT_CONFIG["npsfratios"] = len([self.psf_trunc_ratio])
+        self.DEFAULT_CONFIG["npsfratios"] = 1
 
-        if self.psf_trunc_ratio is not None:
+        if use_trunc_ratio:
 
             logger.info("Using psf_trunc_ratio to calculate Omega...")
 
@@ -606,10 +606,7 @@ class CoronagraphYIP(Coronagraph):
                 ..., np.newaxis
             ]
 
-        elif (
-            self.psf_trunc_ratio is None
-            and self.photometric_aperture_radius is not None
-        ):
+        else:
             logger.info("Using photometric_aperture_radius to calculate Omega...")
 
             # Use the photometric_aperture_radius method of calculating Omega.
@@ -661,9 +658,7 @@ class CoronagraphYIP(Coronagraph):
         )
         lam = mediator.get_observation_parameter("wavelength")
 
-        # TODO how to behave when tele_diam has been overwritten by the user?
-        telescope_params = load_telescope("EAC1").__dict__
-        tele_diam = telescope_params["diam_circ"] * LENGTH
+        tele_diam = mediator.get_telescope_parameter("diameter")
 
         # TODO use lam (observing wavelength range) to calculate the lod value.
         # This implies increasing dimensionality of related parameters.

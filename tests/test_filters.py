@@ -73,6 +73,34 @@ def test_filter_invalid_type():
         Filter("bad", center=0.5 * u.um, bandwidth=0.1, resolution=100, type="INVALID")
 
 
+def test_ifs_without_resolution_demotes_to_imager(caplog):
+    """IFS with no resolution cannot build a grid; it is demoted to broadband."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
+        f = Filter("f", low=0.5 * u.um, high=0.6 * u.um, resolution=None, type="IFS")
+
+    assert f.type == "IMAGER"  # mutated
+    assert len(f.wavelength) == 1  # broadband
+    assert f.delta_wavelength is None
+    assert any("requires a resolution" in r.message for r in caplog.records)
+
+
+def test_imager_with_resolution_warns_but_ignores(caplog):
+    """IMAGER with a resolution set: the value is meaningless and ignored, with a warning."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="pyEDITH"):
+        f = Filter(
+            "f", center=0.55 * u.um, bandwidth=0.2, resolution=140, type="IMAGER"
+        )
+
+    assert f.type == "IMAGER"
+    assert len(f.wavelength) == 1  # still broadband
+    assert f.delta_wavelength is None  # resolution had no effect
+    assert any("ignores the supplied" in r.message for r in caplog.records)
+
+
 def test_wavelength_coverage():
     """Test that wavelength array covers the filter bounds."""
     f = Filter("test", low=1.0 * u.um, high=1.5 * u.um, resolution=50)
@@ -99,6 +127,19 @@ def test_wavelength_units():
 
     assert f.wavelength.unit == u.um
     assert f.delta_wavelength.unit == u.um
+
+
+def test_filter_contains_bare_float_interpreted_as_wavelength_unit():
+    """A bare (non-Quantity) number passed to contains() is interpreted in the
+    default WAVELENGTH unit (covers the bare-float conversion branch)."""
+    from pyEDITH.filters import Filter
+
+    filt = Filter("F1", low=0.5 * u.um, high=0.7 * u.um, type="IMAGER")
+
+    # Bare floats, no units attached — must be interpreted as WAVELENGTH (um).
+    assert filt.contains(0.6) is True  # inside [0.5, 0.7]
+    assert filt.contains(0.4) is False  # below the band
+    assert filt.contains(0.8) is False  # above the band
 
 
 def test_contains_inside():

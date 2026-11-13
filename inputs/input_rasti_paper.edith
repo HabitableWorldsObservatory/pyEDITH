@@ -1,0 +1,38 @@
+; This is an input file for pyEDITH
+; Comments are preceded with a # or a ;
+;In the comments below , ( ) indicates the units and { } indicates the data format
+; Variable names cannot be changed
+; Arrays are encased by [ ] and entries are separated by ,
+; Scalars cannot be encased in [ ]-- scalars are not the same as one - element arrays
+; Spaces do not matter , empty lines do not matter
+;--------------------------------
+;------- REFERENCE LAMBDA -------
+;--------------------------------
+;--- OBSERVATIONAL PARAMETERS ---
+wavelength = 0.5                ; wavelength ( micron )
+snr = 7.0                       ; signal-to-noise ratio at desired wavelength { same length as wavelength }
+CRb_multiplier = 2.             ; factor to multiply to remove background
+psf_trunc_ratio = 0.35          ; truncation ratio of the PSF
+;--- STAR PARAMETERS ---
+distance = 14.8                 ; distance to star (pc)
+FstarV_10pc = 1.244e+02         ; flux in the V band (ph/s/cm ^2/ nm)
+Fstar_10pc = 1.128e+02          ; flux at desired wavelength { same length as wavelength } (ph/s/cm ^2/nm)
+stellar_radius = 0.95           ; stellar radius ( R_sun )
+nzodis = 3.0                    ; amount of exozodi around target star (" zodis ")
+ra = 236.0075773682300          ; right ascension of target star used to estimate zodi (deg)
+dec = 02.5151668316500          ; declination of target star used to estimate zodi (deg)
+;--- PLANET PARAMETERS ---
+separation = 0.062              ; separation of planet ( arcsec )
+Fp/Fs = 6.3e-8                  ; planet contrast at desired wavelength { same length as wavelength }
+;--- OBSERVATORY PARAMETERS ----
+observatory_preset = EAC1
+observing_mode = IMAGER
+;--------------------------------
+;------- SECONDARY LAMBDA -------
+;--------------------------------
+;--- OBSERVATIONAL PARAMETERS ---
+secondary_wavelength = 1.0      ; wavelength ( micron )
+;--- STAR PARAMETERS ---
+secondary_Fstar_10pc = 1.102e+02 ; flux at secondary wavelength { same length as wavelength } (ph/s/cm^2/ nm)
+;--- PLANET PARAMETERS ---
+secondary_Fp/Fs = 6.4e-8       ; planet contrast at secondary wavelength { same length as wavelength }

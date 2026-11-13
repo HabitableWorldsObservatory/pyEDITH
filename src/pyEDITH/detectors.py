@@ -4,6 +4,7 @@ from . import utils
 import astropy.units as u
 from .units import *
 from pyEDITH import parse_input
+import copy
 
 
 class Detector(ABC):
@@ -133,6 +134,7 @@ class ToyModelDetector(Detector):
         """
         self.path = path
         self.keyword = keyword
+        self.DEFAULT_CONFIG = copy.deepcopy(self.DEFAULT_CONFIG)
 
     def load_configuration(self, parameters: dict, mediator: object) -> None:
         """
@@ -160,7 +162,7 @@ class ToyModelDetector(Detector):
             0.5
             * lambda_d_to_arcsec(
                 1 * LAMBDA_D,
-                0.5e-6 * LENGTH,
+                0.5 * WAVELENGTH,
                 mediator.get_telescope_parameter("diameter").to(LENGTH),
             )
         ).to(MAS)
@@ -182,7 +184,7 @@ class ToyModelDetector(Detector):
                 key: parse_input.normalize_list_shapes(
                     self.DEFAULT_CONFIG,
                     key,
-                    mediator.get_observation_parameter("nlambda"),
+                    len(parameters["wavelength"]),
                 )
                 for key in array_params
             }
@@ -271,8 +273,6 @@ class EACDetector(Detector):
 
         Raises
         ------
-        KeyError
-            If the observing mode is not 'IMAGER' or 'IFS'
         AssertionError
             If the QE array contains NaN values after processing
         """
@@ -293,7 +293,7 @@ class EACDetector(Detector):
                 mediator.get_observation_parameter("wavelength_range"),
             )
 
-        elif mediator.get_observation_parameter("observing_mode") == "IFS":
+        else:  # can only be IFS
             detector_params = utils.interpolate_over_bandpass(
                 raw_detector_params, mediator.get_observation_parameter("wavelength")
             )
@@ -331,7 +331,7 @@ class EACDetector(Detector):
             qe_arr[
                 mediator.get_observation_parameter("wavelength") >= 1 * WAVELENGTH
             ] = detector_params["qe_nir"]
-        elif parameters["observing_mode"] == "IFS":
+        else:  # IFS case
             qe_arr[
                 mediator.get_observation_parameter("wavelength") < 1 * WAVELENGTH
             ] = detector_params["qe_vis"][
@@ -360,11 +360,12 @@ class EACDetector(Detector):
         # ] * DIMENSIONLESS  # Effective QE due to degradation, cosmic ray effects, readout inefficiencies ## TO ADD TO YAML
 
         # Calculate default detector pixel scale based on telescope
+
         self.DEFAULT_CONFIG["pixscale_mas"] = (
             0.5
             * lambda_d_to_arcsec(
                 1 * LAMBDA_D,
-                0.5e-6 * LENGTH,
+                0.5 * WAVELENGTH,
                 mediator.get_telescope_parameter("diameter").to(LENGTH),
             )
         ).to(MAS)

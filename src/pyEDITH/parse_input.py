@@ -11,37 +11,47 @@ import logging
 
 logger = logging.getLogger("pyEDITH")
 
+# The legacy primary/secondary ("reference lambda") format predates Filter
+# objects. In the original published pyEDITH code there was a single
+# `bandwidth` doing double duty: the coronagraph bandwidth AND the implicit
+# photometric band width of each reference measurement. Its hardcoded default
+# was 0.2. We preserve that value here so the *published* input file (which
+# omits `bandwidth` entirely) reproduces the paper's results verbatim. New,
+# multi-filter work should use the filter_* syntax and specify widths explicitly.
+LEGACY_DEFAULT_BANDWIDTH = 0.2
 
-def parse_input_file(
-    file_path: Union[Path, str], secondary_flag: bool
-) -> Tuple[Dict, Dict]:
+
+def parse_input_file(file_path: Union[Path, str]) -> dict:
     """
     Parse an input file and extract variables and secondary variables.
 
     This function reads a configuration file, processes its contents line by line,
     and extracts primary and optional secondary variables. It handles various data
     types including arrays, strings, and numeric values, and performs special
-    processing for IFS observing mode parameters. The function handles various data types including arrays, strings, and numbers.
+    processing for IFS observing mode parameters.
+
+    The legacy primary/secondary format (a single primary block plus a mirrored
+    ``secondary_*`` block, as published in the original pyEDITH paper) is retained
+    for backward compatibility. When present, it is translated internally into the
+    canonical representation: a ``filter_list`` of Filter objects plus parallel,
+    piecewise-constant wavelength-dependent arrays. Each legacy band contributes a
+    flat (top-hat) value across its own bandpass, so that the measured datasets are
+    faithfully represented and nothing downstream needs to know the legacy syntax
+    exists. For new, multi-filter work, prefer the ``filter_*`` syntax directly.
+
     Comments in the input file should start with ';'.
 
     Parameters
     ----------
     file_path : Union[Path, str]
         Path to the input file
-    secondary_flag : bool
-        Flag indicating whether secondary variables are expected
 
     Returns
     -------
-    Tuple[Dict, Dict]
-        A tuple containing two dictionaries:
-
-        variables: dict
-            Primary variables extracted from the file
-
-        secondary_variables: dict
-            Secondary variables extracted from the file
-            (any non-specified variable will be the same as in the variables dictionary)
+    variables: dict
+        Primary variables extracted from the file. When a legacy secondary
+        block is translated, this additionally contains a synthesised
+        ``filter_list`` and piecewise-constant wavelength-dependent arrays.
 
     Raises
     ------
@@ -50,9 +60,34 @@ def parse_input_file(
     FileNotFoundError
         If a specified spectrum file cannot be found
     ValueError
-        If there are issues with the spectrum file
-
+        If there are issues with the spectrum file, if both the legacy
+        ``secondary_*`` and modern ``filter_*`` syntaxes are used in the same
+        file, or if the legacy primary/secondary bands overlap.
     """
+    # Parameters that are physically wavelength-dependent and may therefore differ
+    # between the legacy primary and secondary blocks. Anything a secondary_* key
+    # tries to override that is NOT in this set is warned about and discarded.
+    # This is the single source of truth; the IFS block below references it too.
+    WAVELENGTH_DEPENDENT_PARAMS = (
+        "wavelength",
+        "Fstar_10pc",
+        "Fp/Fs",
+        "snr",
+        "T_optical",
+        "epswarmTrcold",
+        "DC",
+        "RN",
+        "tread",
+        "CIC",
+        "QE",
+        "dQE",
+        "IFS_eff",
+        "mag",  # used to be [ntargs x nlambda], now just [nlambda]
+        "ez_PPF",
+        "delta_mag",  # used to be [nmeananom x norbits x ntargs]
+        "F0",  # for validation purposes, the calculation of F0 is different in AYO
+        "det_npix_input",  # for validation purposes
+    )
 
     def _parse_array_value(raw_items: str) -> list:
         """
@@ -124,17 +159,9 @@ def parse_input_file(
 
             if "secondary" in key:
                 has_secondary = True
-                if secondary_flag:
-                    secondary_variables[key[10:]] = (
-                        value  # it replaces the default value
-                    )
+                secondary_variables[key[10:]] = value  # it replaces the default value
             else:
                 variables[key] = value
-
-    if secondary_flag and not has_secondary:
-        raise KeyError(
-            "Secondary flag is True but no secondary variables found in the input file."
-        )
 
     # Check that observing_mode is present and valid
     if "observing_mode" not in variables:
@@ -144,6 +171,16 @@ def parse_input_file(
     if variables["observing_mode"] not in ["IMAGER", "IFS"]:
         raise ValueError(
             f"Invalid observing mode '{variables['observing_mode']}'. Must be 'IMAGER' or 'IFS'."
+        )
+
+    # Legacy secondary_* is an IMAGER-only format. Reject non-IMAGER here,
+    # BEFORE the IFS block, so the user gets a message about the real problem
+    # (secondary_* in the wrong mode) rather than a confusing IFS "missing
+    # required columns" error from a gate that happens to fire first.
+    if has_secondary and variables["observing_mode"] != "IMAGER":
+        raise KeyError(
+            'Legacy secondary mode only works in "IMAGER" mode. '
+            "Use filter_* for IFS mode."
         )
 
     # Handle IFS mode
@@ -200,12 +237,137 @@ def parse_input_file(
                 "Required parameters 'wavelength', 'Fstar_10pc', and 'Fp/Fs' are not provided. Please write them explicitly or provide a spectrum_file path."
             )
 
-    if variables.get("observing_mode") == "IMAGER" and isinstance(
-        variables["wavelength"], list
-    ):
-        raise KeyError(
-            "In IMAGER mode you can only use one wavelength at a time. If you are simulating photometry, please run every single wavelength separately. If you want to model a spectrum, please use IFS mode."
-        )
+    # ------------------------------------------------------------------
+    # LEGACY primary/secondary -> canonical (filter_list + piecewise-constant
+    # wavelength-dependent arrays).
+    #
+    # The published 'secondary_*' format is a two-band photometric
+    # specification: a value is asserted flat across each band. We transcribe
+    # it faithfully by (1) building one Filter per band, and (2) painting each
+    # wavelength-dependent parameter as a TOP-HAT across its own bandpass. The
+    # resulting 'wavelength' array is the measurement sampling grid (its
+    # documented meaning), so every downstream resample onto a filter's grid
+    # lands between two identical samples -> flat value, no interp1d bounds
+    # error, and no fabricated spectral slope between the two unrelated bands.
+    #
+    # This runs BEFORE the modern filter_* block so the two syntaxes remain
+    # mutually exclusive and the synthesised filter_list is not overwritten.
+    # The legacy mode is accepted only for IMAGER observing mode.
+    # ------------------------------------------------------------------
+    if has_secondary:
+
+        filter_keys_present_early = any(key.startswith("filter_") for key in variables)
+        if filter_keys_present_early:
+            raise ValueError(
+                "An input file may use either the legacy secondary_* parameters "
+                "or the filter_* parameters, not both. Use filter_* for new, "
+                "multi-filter runs; secondary_* is retained only for backward "
+                "compatibility with the originally published format."
+            )
+
+        # (1) Warn-and-drop any secondary override that is not wavelength-dependent.
+        for key in list(secondary_variables.keys()):
+            if key not in WAVELENGTH_DEPENDENT_PARAMS:
+                logger.warning(
+                    f"'secondary_{key}' is not a wavelength-dependent parameter "
+                    f"and cannot differ between the primary and secondary band; "
+                    f"it will be ignored. (Wavelength-dependent parameters are: "
+                    f"{', '.join(WAVELENGTH_DEPENDENT_PARAMS)}.)"
+                )
+                secondary_variables.pop(key)
+
+        if "wavelength" not in variables:
+            raise KeyError(
+                "Legacy secondary mode requires a primary 'wavelength' to define "
+                "the first band."
+            )
+        if "wavelength" not in secondary_variables:
+            raise KeyError(
+                "Legacy secondary mode requires 'secondary_wavelength' to define "
+                "the second band."
+            )
+        observing_mode = variables["observing_mode"]
+
+        bandwidth = variables.get("bandwidth")
+        if bandwidth is None:
+            bandwidth = LEGACY_DEFAULT_BANDWIDTH
+            logger.info(
+                f"Legacy secondary ('reference lambda') mode: no 'bandwidth' "
+                f"supplied; defaulting each band's top-hat width to the historical "
+                f"value {LEGACY_DEFAULT_BANDWIDTH} (the original coronagraph/filter "
+                f"bandwidth), to reproduce the published behaviour."
+            )
+            variables["bandwidth"] = bandwidth
+
+        # (2) Build one Filter per band. These define the band edges we paint over.
+        # Resolution = None is fine because we are enforcing IMAGING mode.
+        prim_wl = variables["wavelength"]
+        sec_wl = secondary_variables["wavelength"]
+        filters = [
+            Filter(
+                "primary",
+                center=prim_wl * u.um,
+                bandwidth=bandwidth,
+                resolution=None,
+                type=observing_mode,
+            ),
+            Filter(
+                "secondary",
+                center=sec_wl * u.um,
+                bandwidth=bandwidth,
+                resolution=None,
+                type=observing_mode,
+            ),
+        ]
+
+        # Resolve each band's edges (in WAVELENGTH units) directly from the
+        # Filter objects, so the sampling grid always matches the grid the
+        # filters will actually query during resampling.
+        lo0 = filters[0].low.to(u.um).value
+        hi0 = filters[0].high.to(u.um).value
+        lo1 = filters[1].low.to(u.um).value
+        hi1 = filters[1].high.to(u.um).value
+
+        # Guard against overlapping / out-of-order bands: a flat per-band value
+        # cannot be defined unambiguously if the bandpasses intersect.
+        if not hi0 < lo1:
+            raise ValueError(
+                f"Legacy primary band [{lo0}, {hi0}] um and secondary band "
+                f"[{lo1}, {hi1}] um overlap or are out of order. The two "
+                f"wavelengths must define non-overlapping bandpasses."
+            )
+
+        # (3) Paint each wavelength-dependent parameter flat across its own band.
+        #     Two samples per band, each carrying that band's value, nudged just
+        #     beyond the edges so every in-band query point lies strictly between
+        #     two identical samples (no interp1d bounds error at the edges).
+        eps = 1e-9  # guard against floating-point equality at the boundary
+        band_edges = [(lo0, hi0), (lo1, hi1)]
+
+        sampled_wl = []
+        for lo, hi in band_edges:
+            sampled_wl.extend([lo - eps, hi + eps])
+        variables["wavelength"] = sampled_wl
+
+        for key in WAVELENGTH_DEPENDENT_PARAMS:
+            if key == "wavelength":
+                continue  # handled above as the sampling grid itself
+            prim_value = variables.get(key)
+            if prim_value is None:
+                # Parameter not present at all in the primary block; nothing to
+                # paint. Default values will likely be used.
+                continue
+            # If the secondary block overrode this key use its value for the
+            # secondary band; otherwise the secondary band inherits the primary
+            # value (flat across both bands).
+            sec_value = secondary_variables.get(key, prim_value)
+            # Two samples per band, flat: [prim, prim, sec, sec]
+            variables[key] = [prim_value, prim_value, sec_value, sec_value]
+
+        # Publish the synthesised filter list and fully dissolve the legacy
+        # secondary block: downstream now sees only the canonical form.
+        variables["filter_list"] = filters
+        secondary_variables.clear()
 
     # ------------------------------------------------------------------
     # Handle Filters feature: reconstruct Filter objects from parallel
@@ -215,8 +377,19 @@ def parse_input_file(
     # resolution is optional for IMAGER but required for IFS, matching
     # the fact that resolution is only physically meaningful for a
     # spectrograph.
-    # ------------------------------------------------------------------
-    filter_keys_present = [key for key in variables if key.startswith("filter_")]
+
+    # Modern filter_* input keys only — exclude already-synthesised outputs
+    # like 'filter_list' (produced by the legacy shim above), which share the
+    # 'filter_' prefix but are NOT user-supplied filter specifications.
+    _filter_input_keys = {
+        "filter_name",
+        "filter_center",
+        "filter_bandwidth",
+        "filter_low",
+        "filter_high",
+        "filter_resolution",
+    }
+    filter_keys_present = [key for key in variables if key in _filter_input_keys]
 
     if filter_keys_present:
         if "filter_name" not in variables:
@@ -297,7 +470,7 @@ def parse_input_file(
 
         variables["filter_list"] = filter_list
 
-    return variables, secondary_variables
+    return variables
 
 
 def normalize_list_shapes(parameters, key, default_len=1):
@@ -617,203 +790,204 @@ def parse_parameters(parameters: dict) -> dict:
             if overrides_list:
                 parsed_params["overrides"] = overrides_list
 
+    # Canonical objects that parse_parameters does not *transform* but must not
+    # *drop*. They are produced upstream by parse_input_file (or passed directly
+    # in the Python API) and consumed downstream.
+    PASSTHROUGH_KEYS = ("filter_list",)
+    for key in PASSTHROUGH_KEYS:
+        if key in parameters:
+            parsed_params[key] = parameters[key]
+
     # Update _parsed key
     parsed_params["_parsed"] = True
     return parsed_params
 
 
 def parse_filters(parameters):
+    """Return the list of active Filter objects for this observation.
 
-    active_filters = []
-    # ALWAYS ensure it has units
-    input_wls = parameters["wavelength"]
+    Two paths:
+      - Modern: an explicit `filter_list` is provided and validated/filtered.
+      - Legacy: filters are synthesised from deprecated scalar parameters.
+    """
 
-    if not isinstance(input_wls, u.Quantity):
-        input_wls = input_wls * WAVELENGTH
+    mode = parameters["observing_mode"]
 
-    wl_min = np.min(input_wls).to(WAVELENGTH)
-    wl_max = np.max(input_wls).to(WAVELENGTH)
+    if mode not in ["IMAGER", "IFS"]:
+        raise ValueError(
+            f"Could not parse filters: unrecognised observing_mode "
+            f"'{mode}'. Expected 'IMAGER' or 'IFS'."
+        )
 
-    if "filter_list" in parameters.keys():
-        filter_list = parameters["filter_list"]
+    # Make parameters wavelength a quantity and scale to the right units
+    wavelength = parameters["wavelength"]
+    if not isinstance(wavelength, u.Quantity):
+        wavelength = wavelength * WAVELENGTH
+    input_wls = wavelength.to(WAVELENGTH)
 
-        # If it's a single filter, convert to list
-        if not isinstance(filter_list, list):
-            filter_list = [filter_list]
+    # Check that no IFS mode with single wavelengths have been provided
+    if input_wls.size == 1 and mode == "IFS":
+        raise ValueError(
+            "Assigned an IFS filter but only one wavelength datapoint is provided."
+        )
 
-        # Validate each filter in the list
-        for i, f in enumerate(filter_list):
-            # Check if it's a Filter object (duck typing - check for expected attributes)
-            if not hasattr(f, "__dict__"):
-                raise TypeError(
-                    f"Filter at index {i}: must be a Filter object, "
-                    f"but got {type(f).__name__}"
-                )
+    if "filter_list" in parameters:  # standard behavior
+        active = _select_from_filter_list(parameters, input_wls)
+    else:  # legacy behavior
+        active = _build_legacy_filters(parameters, input_wls)
 
-            # TEMPORARY: will go away once we force the user to provide the spectrum
-            # check if the value is in-between the filter that I request. Assume it is the average value.
-            if (parameters["observing_mode"] == "IMAGER") and (
-                wl_min <= f.high and wl_max >= f.low
-            ):  # wl_min and wl_max should be the same
-                active_filters.append(f)
-            # Check spectral resolution compatibility for IFS mode
-            elif (parameters["observing_mode"] == "IFS") and (
-                wl_min <= f.low and wl_max >= f.high
-            ):  # checking that original wavelength range is larger than the required filter
-                active_filters.append(f)
-                # Calculate input spectrum resolution
-                input_dlam = np.gradient(input_wls)
-                input_resolution = input_wls / input_dlam
+    if not active:
+        raise ValueError(
+            "No filters can be used. Specify different filters or change spectrum."
+        )
+    return active
 
-                # Find overlapping wavelength region
-                overlap_mask = (input_wls >= f.low) & (input_wls <= f.high)
-                if np.any(overlap_mask):
-                    # Get median resolution in overlapping region
-                    median_input_res = np.median(input_resolution[overlap_mask])
 
-                    # Warn if input resolution is lower than filter resolution
-                    if median_input_res < f.resolution:
-                        logger.warning(
-                            f"Filter {f.name if hasattr(f, 'name') else f}: "
-                            f"Input spectrum resolution (R~{median_input_res:.1f}) is lower than "
-                            f"filter resolution (R~{f.resolution:.1f}). "
-                            f"Interpolation to filter wavelength grid may introduce artifacts."
-                        )
-            else:
-                logger.warning(
-                    f"Filter {f.name if hasattr(f, 'name') else f} discarded: "
-                    f"wavelength range [{wl_min}, {wl_max}] does not fully cover "
-                    f"filter range [{f.low}, {f.high}]"
-                )
+def _select_from_filter_list(parameters, input_wls):
+    """Validate a user-supplied filter_list and keep those covered by the
+    input wavelength range. For IFS, warn if the input under-resolves a filter."""
 
-        if len(active_filters) == 0:
-            raise ValueError(
-                "No filters can be used. Specify different filters or change spectrum."
+    mode = parameters["observing_mode"]
+    filter_list = parameters["filter_list"]
+    if not isinstance(filter_list, list):
+        filter_list = [filter_list]
+
+    wl_min, wl_max = np.min(input_wls), np.max(input_wls)
+    active = []
+
+    for i, f in enumerate(filter_list):
+        if not hasattr(f, "__dict__"):
+            raise TypeError(
+                f"Filter at index {i}: must be a Filter object, "
+                f"but got {type(f).__name__}"
             )
-        else:
-            return active_filters
-    else:
-        logger.warning("Making a filter from the legacy parameters...")
-        # LEGACY FILTER HELPER
 
-        if parameters["observing_mode"] == "IMAGER":
-            # Extract scalar value from input_wls, handling both array and scalar cases
+        # Check that filter is contained within wavelength range
+        # IMAGER (TEMPORARY: will go away once we force the user to provide the spectrum):
+        # check if the value is in-between the filter that I request. Assume it is the average value.
+        # IFS: check if the wavelength extends beyond filter edges
+        covered = (mode == "IMAGER" and wl_min <= f.high and wl_max >= f.low) or (
+            mode == "IFS" and wl_min <= f.low and wl_max >= f.high
+        )
+        if not covered:
+            logger.warning(
+                f"Filter {getattr(f, 'name', f)} discarded: wavelength range [{wl_min}, {wl_max}] does not fully cover filter range [{f.low}, {f.high}]"
+            )
+            continue
 
-            if input_wls.isscalar:
-                center = input_wls
-            else:
-                center = input_wls.flat[0]  # it is an array, pick the first value
+        active.append(f)
 
-            return [
-                Filter(
-                    name=str(np.round(center.value, 1))
-                    + " BW "
-                    + str(parameters["bandwidth"]),
-                    center=center,
-                    bandwidth=parameters["bandwidth"],
-                    type="IMAGER",
-                )
-            ]
-
-        elif parameters["observing_mode"] == "IFS":
-            # In IFS mode, create a filter for each value of spectral_resolution/lam_low/lam_high
-            logger.info("Calculating a new wavelength grid and re-gridding spectra...")
-
-            deprecated_keys = ["spectral_resolution", "lam_low", "lam_high"]
-            if all(key in parameters for key in deprecated_keys):
-                logger.warning(
-                    "DeprecationWarning: The parameters 'regrid_wavelength', 'spectral_resolution', 'lam_low', and 'lam_high' will be deprecated soon. "
-                    "Please update your configuration to use the new Filter object."
-                )
-
-                # Check that all required parameters are arrays/lists
-                for key in deprecated_keys:
-                    val = parameters[key]
-                    if not isinstance(val, (list, np.ndarray, u.Quantity)):
-                        raise ValueError(
-                            f"'{key}' is not an array. "
-                            f"All of {', '.join(deprecated_keys)} must be arrays of the same length."
-                        )
-
-                assert (
-                    len(parameters["spectral_resolution"])
-                    == len(parameters["lam_low"])
-                    == len(parameters["lam_high"])
-                ), f"{', '.join(deprecated_keys)} have different lengths. All must have the same length."
-                assert (
-                    np.min(input_wls.value) < parameters["lam_low"][0]
-                ), "Your minimum input wavelength is greater than first channel lower boundary."
-                assert (
-                    np.max(input_wls.value) > parameters["lam_high"][-1]
-                ), f"Your maximum input wavelength is less than last channel upper boundary."
-
-                for i in range(0, len(parameters["spectral_resolution"])):
-                    res = parameters["spectral_resolution"][i]
-                    lam_low = parameters["lam_low"][i]
-                    lam_high = parameters["lam_high"][i]
-                    if not isinstance(lam_low, u.Quantity):
-                        lam_low = lam_low * WAVELENGTH
-                    if not isinstance(lam_high, u.Quantity):
-                        lam_high = lam_high * WAVELENGTH
-                    active_filters.append(
-                        Filter(
-                            str(np.round(lam_low, 1))
-                            + "-"
-                            + str(np.round(lam_high, 1))
-                            + "IFS",
-                            low=lam_low,
-                            high=lam_high,
-                            resolution=res,
-                            type="IFS",
-                        )
+        # IFS-only resolution diagnostic
+        if mode == "IFS":
+            overlap = (input_wls >= f.low) & (input_wls <= f.high)
+            if np.any(overlap):
+                input_res = input_wls / np.gradient(input_wls)
+                if np.median(input_res[overlap]) < f.resolution:
+                    logger.warning(
+                        f"Filter {f.name if hasattr(f, 'name') else f}: "
+                        f"Input spectrum resolution (R~{np.median(input_res[overlap]):.1f}) is lower than "
+                        f"filter resolution (R~{f.resolution:.1f}). "
+                        f"Interpolation to filter wavelength grid may introduce artifacts."
                     )
+    return active
 
-                return active_filters
-            else:
+
+def _build_legacy_filters(parameters, input_wls):
+    """Synthesise Filter objects from deprecated scalar parameters."""
+
+    def _as_wavelength_quantity(values):
+        return u.Quantity(
+            [
+                v.to(WAVELENGTH) if isinstance(v, u.Quantity) else v * WAVELENGTH
+                for v in values
+            ]
+        )
+
+    logger.warning("Making a filter from the legacy parameters...")
+    mode = parameters["observing_mode"]
+    active = []
+
+    if mode == "IMAGER":
+        center = input_wls if input_wls.isscalar else input_wls.flat[0]
+
+        # If no bandwidth, fall back to the historical 0.2.
+        #  We WARN (not merely info) because two deprecated things are
+        # happening at once: the legacy scalar path is being used AND a bandwidth
+        # is being fabricated. The modern filter_* path, by contrast, demands an
+        # explicit bandwidth.
+        bandwidth = parameters.get("bandwidth")
+        if bandwidth is None:
+            bandwidth = LEGACY_DEFAULT_BANDWIDTH
+            logger.warning(
+                f"Legacy IMAGER path: no 'bandwidth' supplied; defaulting to the "
+                f"historical value {LEGACY_DEFAULT_BANDWIDTH}. Specify 'bandwidth' "
+                f"explicitly, or switch to the modern filter_* syntax, to silence "
+                f"this warning."
+            )
+        active.append(
+            Filter(
+                name=str(np.round(center.value, 1)) + " BW " + str(bandwidth),
+                center=center,
+                bandwidth=bandwidth,
+                type="IMAGER",
+            )
+        )
+
+    else:
+        # In IFS mode, create a filter for each value of spectral_resolution/lam_low/lam_high
+        logger.info("Calculating a new wavelength grid and re-gridding spectra...")
+
+        # Stop if not all the keys are available, else raise warning for legacy
+        deprecated_keys = ["spectral_resolution", "lam_low", "lam_high"]
+        if not all(key in parameters for key in deprecated_keys):
+            raise ValueError(
+                f"Could not find filters; attempted legacy behavior but some of the following keys are missing: {deprecated_keys}"
+            )
+
+        logger.warning(
+            "DeprecationWarning: The parameters 'regrid_wavelength', 'spectral_resolution', 'lam_low', and 'lam_high' will be deprecated soon. "
+            "Please update your configuration to use the new Filter object."
+        )
+
+        # Check that all required parameters are arrays/lists
+        for key in deprecated_keys:
+            val = parameters[key]
+            if not isinstance(val, (list, np.ndarray, u.Quantity)):
                 raise ValueError(
-                    f"Could not find filters; attempted legacy behavior but some of the following keys are missing: {deprecated_keys}"
+                    f"'{key}' is not an array. "
+                    f"All of {', '.join(deprecated_keys)} must be arrays of the same length."
                 )
 
+        assert (
+            len(parameters["spectral_resolution"])
+            == len(parameters["lam_low"])
+            == len(parameters["lam_high"])
+        ), f"{', '.join(deprecated_keys)} have different lengths. All must have the same length."
 
-def read_configuration(
-    input_file: Union[Path, str], secondary_flag: bool = False
-) -> Tuple[Dict, Dict]:
-    """
-    Read and parse configuration from an input file.
+        lam_low = _as_wavelength_quantity(parameters["lam_low"])
+        lam_high = _as_wavelength_quantity(parameters["lam_high"])
+        assert np.min(input_wls) < np.min(
+            lam_low
+        ), "Your minimum input wavelength is greater than smallest channel lower boundary."
+        assert np.max(input_wls) > np.max(
+            lam_high
+        ), f"Your maximum input wavelength is less than largest channel upper boundary."
 
-    This function reads the input file, extracts parameters, and then parses both
-    the primary and secondary parameters. It serves as a high-level wrapper around
-    parse_input_file() and parse_parameters().
+        for i in range(0, len(parameters["spectral_resolution"])):
+            active.append(
+                Filter(
+                    str(np.round(lam_low[i], 1))
+                    + "-"
+                    + str(np.round(lam_high[i], 1))
+                    + "IFS",
+                    low=lam_low[i],
+                    high=lam_high[i],
+                    resolution=parameters["spectral_resolution"][i],
+                    type="IFS",
+                )
+            )
 
-    Parameters
-    ----------
-    input_file : Union[Path, str]
-        Path to the input configuration file
-    secondary_flag : bool, optional
-        Flag indicating whether secondary variables should be processed, default is False
-
-    Returns
-    -------
-    Tuple[Dict, Dict]
-        A tuple containing two dictionaries:
-
-        parsed_parameters: dict
-            Parsed primary parameters
-
-        parsed_secondary_parameters: dict
-            Parsed secondary parameters (empty if secondary_flag is False)
-    """
-
-    parameters, secondary_parameters = parse_input_file(input_file, secondary_flag)
-    parsed_parameters = parse_parameters(parameters)
-
-    if secondary_flag:
-        # Parse secondary parameters
-        parsed_secondary_parameters = parse_parameters(secondary_parameters)
-    else:
-        parsed_secondary_parameters = {}
-
-    return parsed_parameters, parsed_secondary_parameters
+    return active
 
 
 def get_observatory_config(parameters: Dict[str, str]) -> Union[str, Dict[str, str]]:

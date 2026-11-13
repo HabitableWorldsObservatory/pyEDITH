@@ -4,6 +4,7 @@ from . import utils
 import astropy.units as u
 from .units import *
 from pyEDITH import parse_input
+import copy
 
 
 class Telescope(ABC):
@@ -130,6 +131,7 @@ class ToyModelTelescope(Telescope):
 
         self.path = path
         self.keyword = keyword
+        self.DEFAULT_CONFIG = copy.deepcopy(self.DEFAULT_CONFIG)
 
     def load_configuration(self, parameters: dict, mediator: object) -> None:
         """
@@ -241,11 +243,6 @@ class EACTelescope(Telescope):
             and telescope specifications
         mediator : ObservatoryMediator
             Mediator object providing access to observation and coronagraph parameters
-
-        Raises
-        ------
-        KeyError
-            If the observing mode is not 'IMAGER' or 'IFS'
         """
         parameters = parse_input.parse_parameters(parameters)
 
@@ -261,7 +258,7 @@ class EACTelescope(Telescope):
                 telescope_params, mediator.get_observation_parameter("wavelength_range")
             )
 
-        elif mediator.get_observation_parameter("observing_mode") == "IFS":
+        else:  # IFS case
             # interpolate telescope throughput onto native wavelength grid
             telescope_params = utils.interpolate_over_bandpass(
                 telescope_params, mediator.get_observation_parameter("wavelength")

@@ -158,7 +158,7 @@ def calc_flux_zero_point(
                 SPECTRAL_FLUX_DENSITY_CGS_WAVELENGTH,
                 equivalencies=u.spectral_density(lambd),
             )
-        elif output_unit == "pcgs":
+        else:  # can either be cgs or pcgs in the perlambd case (Jy and perlambd are incompatible)
             f0 = f0.to(
                 PHOTON_FLUX_DENSITY_CGS_WAVELENGTH,
                 equivalencies=u.spectral_density(lambd),
@@ -849,8 +849,14 @@ class AstrophysicalScene:
                     getattr(self, attr_name),
                     self._input_wavelength,
                     observation.wavelength.value,
-                    observation.delta_wavelength.value,
+                    (
+                        observation.delta_wavelength.value
+                        if observation.delta_wavelength is not None
+                        else None
+                    ),
                     name=attr_name,
-                    interpolation="Gaussian",
+                    interpolation=(
+                        "Gaussian" if observation.delta_wavelength is not None else "1d"
+                    ),
                 ),
             )
