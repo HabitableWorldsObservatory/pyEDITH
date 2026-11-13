@@ -889,6 +889,7 @@ def test_coronagraph_yip_load_configuration_imager_az_avg_false(
     mock_instrument,
     mock_telescope,
     imager_yipcoronagraph_basic_params,
+    monkeypatch,
 ):
     """Test that az_avg=False uses full 2D stellar intensity map."""
     from unittest.mock import MagicMock
@@ -900,9 +901,14 @@ def test_coronagraph_yip_load_configuration_imager_az_avg_false(
     original_stellar_intens = yippy_coronagraph.stellar_intens
     original_core_mean = yippy_coronagraph.core_mean_intensity_map
 
-    yippy_coronagraph.stellar_intens = MagicMock(side_effect=original_stellar_intens)
-    yippy_coronagraph.core_mean_intensity_map = MagicMock(
-        side_effect=original_core_mean
+    stellar_intens_tmp = MagicMock(side_effect=original_stellar_intens)
+    stellar_intens_tmp.center_x = original_stellar_intens.center_x
+    stellar_intens_tmp.center_y = original_stellar_intens.center_y
+    monkeypatch.setattr(yippy_coronagraph, "stellar_intens", stellar_intens_tmp)
+    monkeypatch.setattr(
+        yippy_coronagraph,
+        "core_mean_intensity_map",
+        MagicMock(side_effect=original_core_mean),
     )
 
     coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
