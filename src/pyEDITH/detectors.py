@@ -185,7 +185,6 @@ class ToyModelDetector(Detector):
                     self.DEFAULT_CONFIG,
                     key,
                     len(parameters["wavelength"]),
-                    # len(mediator.get_observation_parameter("wavelength")),
                 )
                 for key in array_params
             }

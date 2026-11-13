@@ -45,10 +45,6 @@ class MockMediator_IMAGER:
             return 8.0 * LENGTH
         return 1.0
 
-    def get_eac_configuration(self):
-        # Return None - tests use ToyModel or direct YIP files
-        return None
-
 
 class MockMediator_IFS:
     def get_observation_parameter(self, param):
@@ -71,10 +67,6 @@ class MockMediator_IFS:
         if param == "diameter":
             return 8.0 * LENGTH
         return 1.0
-
-    def get_eac_configuration(self):
-        # Return None - tests use ToyModel or direct YIP files
-        return None
 
 
 @pytest.fixture

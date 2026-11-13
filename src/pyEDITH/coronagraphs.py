@@ -151,6 +151,10 @@ class Coronagraph(ABC):
         Number of PSF ratios.
     nrolls : int
         Number of roll angles.
+    coronagraph_optical_throughput: np.ndarray
+        Throughput for all coronagraph optics in the optical path
+    coronagraph_optical_throughput: np.ndarray
+        Spectral resolution of the coronagraph.
     """
 
     # Keys that a user is NOT allowed to override for this coronagraph mode.
@@ -198,6 +202,7 @@ class Coronagraph(ABC):
             "coronagraph_bandwidth": float,
             "npsfratios": int,
             "nrolls": int,
+            "coronagraph_optical_throughput": DIMENSIONLESS,
             "coronagraph_spectral_resolution": DIMENSIONLESS,
         }
 
@@ -249,7 +254,6 @@ class ToyModelCoronagraph(Coronagraph):
         * DIMENSIONLESS,  # core throughput of coronagraph (uniform over dark hole, unitless, scalar)
         "TLyot": 0.65 * DIMENSIONLESS,  # Lyot transmission of the coronagraph
         "nrolls": 1,  # number of rolls
-        # * DIMENSIONLESS,  # Coronagraph throughput [made up from EAC1-ish]
         "coronagraph_optical_throughput": [0.44]
         * DIMENSIONLESS,  # Coronagraph throughput [made up from EAC1-ish]
         "coronagraph_spectral_resolution": 1
@@ -292,7 +296,8 @@ class ToyModelCoronagraph(Coronagraph):
         )
 
         # # Convert to numpy array when appropriate
-        # utils.convert_to_numpy_array(self, array_params)
+        array_params = ["coronagraph_optical_throughput"]
+        utils.convert_to_numpy_array(self, array_params)
 
         # Derived parameters
         self.npsfratios = 1
@@ -426,6 +431,7 @@ class CoronagraphYIP(Coronagraph):
         "nrolls": 1,  # number of rolls
         "Tcore": 0.2968371
         * DIMENSIONLESS,  # core throughput within off-axis PSF (only used with photometric_aperture_radius method of calculating Omega)
+        "coronagraph_optical_throughput": None,
         "coronagraph_spectral_resolution": 1
         * DIMENSIONLESS,  # Set to default. It is used to limit the bandwidth if the coronagraph has a specific spectral window.
         "az_avg": True,  # azimuthally average the contrast maps and noise floor if True
