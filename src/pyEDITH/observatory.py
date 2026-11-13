@@ -14,12 +14,6 @@ from pyEDITH import detectors, parse_input, telescopes
 
 logger = logging.getLogger("pyEDITH")
 
-# Effective QE due to degradation, cosmic ray effects, and readout
-# inefficiencies. Not yet tracked by eacy or hwome engineering data;
-# this is a placeholder until real per-channel values are available.
-# TODO: replace with real values once available from eacy/hwome.
-DEFAULT_DQE = 0.75
-
 
 class Observatory(ABC):  # abstract class
     """

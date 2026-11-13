@@ -29,17 +29,17 @@ def main():
     ValueError
         If no reference wavelength option is specified in etc2snr
     """
-    # parent_parser = ArgumentParser(add_help=False)
-    # parent_parser.add_argument(
-    #     "-v",
-    #     "--verbose",
-    #     action="count",
-    #     default=0,
-    #     help="Increase verbosity: -v for INFO, -vv for DEBUG logs with detailed output",
-    # )
-    # parent_parser.add_argument(
-    #     "-q", "--quiet", action="store_true", help="Quiet mode, only show errors"
-    # )
+    parent_parser = ArgumentParser(add_help=False)
+    parent_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Increase verbosity: -v for INFO, -vv for DEBUG logs with detailed output",
+    )
+    parent_parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Quiet mode, only show errors"
+    )
 
     parser = ArgumentParser(
         description="Available command line arguments for E.D.I.T.H.",

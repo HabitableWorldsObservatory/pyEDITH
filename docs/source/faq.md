@@ -82,8 +82,8 @@ More up-to-date information can be found on [HWO’s website](https://science.na
 :::{dropdown} What wavelength boundaries should I assume for the various channels?
 Coronagraphy trade studies for HWO are ongoing, and instrument parameters remain preliminary. In literature, common wavelength boundaries are:
 
-- **UV:** between ~200–300 nm and ~500–530 nm
-- **Visible:** between ~500–530 nm and ~1000–1030 nm
+- **UV:** between ~200–300 nm and ~450–500 nm
+- **Visible:** between ~450–500 nm and ~1000–1030 nm
 - **NIR:** between ~1000–1030 nm and ~1700–1800 nm
 
 More up-to-date information can be found on [HWO’s website](https://science.nasa.gov/astrophysics/programs/habitable-worlds-observatory/).

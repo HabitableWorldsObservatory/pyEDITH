@@ -157,7 +157,6 @@ def toymodel_api_parameters():
         "observatory_preset": "ToyModel",
         "wavelength": 0.5,  # native Quantity, NOT a parsed bare float
         "snr": 7.0,
-        "bandwidth": 0.2,
         "CRb_multiplier": 2.0,
         "photometric_aperture_radius": 0.85,
         "distance": 10.0,
@@ -169,9 +168,12 @@ def toymodel_api_parameters():
         "dec": 2.5151668316500,
         "separation": 0.1,
         "Fp/Fs": 1e-10,
+        "T_optical": 0.532,
         # A real Filter object, as a user would construct -- not synthesised from
         # scalars by the legacy shim. This exercises _select_from_filter_list.
-        "filter_list": [Filter("toy", center=0.5 * u.um, bandwidth=0.2, type="IMAGER")],
+        "filter_list": [
+            Filter("toy_filter", center=0.5 * u.um, bandwidth=0.2, type="IMAGER")
+        ],
     }
 
 
@@ -187,8 +189,8 @@ def test_workflow_native_types_etc(toymodel_api_parameters):
     parsed = parse_parameters(toymodel_api_parameters)
     results, _ = calculate_texp(parsed)
 
-    assert "toy" in results, "Expected a result keyed by the Filter's name."
-    exptime = results["toy"]["exposure_time"]
+    assert "toy_filter" in results, "Expected a result keyed by the Filter's name."
+    exptime = results["toy_filter"]["exposure_time"]
     assert isinstance(exptime, u.Quantity)
     # ToyModel is deterministic; the time must at least be a finite, positive
     # physical quantity (we assert correctness of the *value* in test #3's
@@ -204,8 +206,8 @@ def test_workflow_native_types_snr(toymodel_api_parameters):
     parsed = parse_parameters(toymodel_api_parameters)
     results, _ = calculate_snr(parsed, reference_texp=1e5 * u.s)
 
-    assert "toy" in results
-    snr = results["toy"]["snr"]
+    assert "toy_filter" in results
+    snr = results["toy_filter"]["snr"]
     assert isinstance(snr, u.Quantity)
     assert np.all(np.isfinite(snr.value))
     assert np.all(snr.value >= 0)
@@ -230,7 +232,6 @@ def test_workflow_etc2snr():
             "observatory_preset": "ToyModel",
             "wavelength": [0.5, 1.0],
             "snr": 7.0,
-            "bandwidth": 0.2,
             "CRb_multiplier": 2.0,
             "photometric_aperture_radius": 0.85,
             "distance": 10.0,
@@ -287,7 +288,6 @@ def test_workflow_etc2snr_single_filter_raises():
             "observatory_preset": "ToyModel",
             "wavelength": 0.5,
             "snr": 7.0,
-            "bandwidth": 0.2,
             "CRb_multiplier": 2.0,
             "photometric_aperture_radius": 0.85,
             "distance": 10.0,
