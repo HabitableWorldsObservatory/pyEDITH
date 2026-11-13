@@ -26,8 +26,6 @@ a *query knob*: vary it on the command line without editing the config file.
 ```bash
 pyedith etc2snr --edith path/to/your/config.edith --ref_lambda 0.5
 ```
-In this case, the config file will need to also have a secondary set of parameters see Figure A1 in [Alei, Currie et al. 2026](https://ui.adsabs.harvard.edu/abs/2026arXiv260828477A/abstract).
-
 
 Solves the exposure time at the reference wavelength (`0.5` microns, on the
 filter containing it) and applies that single shared time to *all* filters,

@@ -153,7 +153,7 @@ class Coronagraph(ABC):
         Number of roll angles.
     coronagraph_optical_throughput: np.ndarray
         Throughput for all coronagraph optics in the optical path
-    coronagraph_optical_throughput: np.ndarray
+    coronagraph_spectral_resolution: np.ndarray
         Spectral resolution of the coronagraph.
     """
 

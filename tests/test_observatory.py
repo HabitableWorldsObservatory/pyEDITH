@@ -38,7 +38,6 @@ from pyEDITH.units import (
 from pyEDITH.filters import Filter
 from yippy import Coronagraph as yippycoro
 import logging
-from pyEDITH.observatory import DEFAULT_OPTICS_THROUGHPUT
 
 # ============================================================================
 # Mock Helper Functions

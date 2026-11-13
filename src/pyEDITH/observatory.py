@@ -20,11 +20,6 @@ logger = logging.getLogger("pyEDITH")
 # TODO: replace with real values once available from eacy/hwome.
 DEFAULT_DQE = 0.75
 
-# A flat, placeholder optics throughput used when no explicit T_optical is given
-# and no EAC engineering configuration is present (i.e. ToyModel / default
-# observatories).
-DEFAULT_OPTICS_THROUGHPUT = 0.532  # From Stark et al. ETC validation
-
 
 class Observatory(ABC):  # abstract class
     """
