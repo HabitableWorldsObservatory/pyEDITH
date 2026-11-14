@@ -174,13 +174,13 @@ def single_wavelength_params():
 # ============================================================================
 
 
-def test_generate_radii_even_dimensions():
+def test__generate_radii_even_dimensions():
     """Test radii generation with even dimensions."""
     radii = _generate_radii(10, 10)
     assert radii.shape == (10, 10)
 
 
-def test_generate_radii_odd_dimensions():
+def test__generate_radii_odd_dimensions():
     """Test radii generation with odd dimensions has zero at center."""
     radii = _generate_radii(5, 5)
 
@@ -188,7 +188,7 @@ def test_generate_radii_odd_dimensions():
     assert np.isclose(radii[0, 0], np.sqrt(radii[0, 2] ** 2 + radii[2, 0] ** 2))
 
 
-def test_generate_radii_default_square():
+def test__generate_radii_default_square():
     """Test radii generation defaults to square when y dimension not provided."""
     radii = _generate_radii(5)
 
@@ -890,7 +890,11 @@ def test_coronagraph_yip_load_configuration_imager_az_avg_false(
     stellar_intens_tmp.center_x = original_stellar_intens.center_x
     stellar_intens_tmp.center_y = original_stellar_intens.center_y
     monkeypatch.setattr(yippy_coronagraph, "stellar_intens", stellar_intens_tmp)
-    monkeypatch.setattr(yippy_coronagraph, "core_mean_intensity_map", MagicMock(side_effect=original_core_mean))
+    monkeypatch.setattr(
+        yippy_coronagraph,
+        "core_mean_intensity_map",
+        MagicMock(side_effect=original_core_mean),
+    )
 
     coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
     parameters = imager_yipcoronagraph_basic_params.copy()

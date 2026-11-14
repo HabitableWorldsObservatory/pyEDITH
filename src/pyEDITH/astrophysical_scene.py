@@ -849,8 +849,14 @@ class AstrophysicalScene:
                     getattr(self, attr_name),
                     self._input_wavelength,
                     observation.wavelength.value,
-                    observation.delta_wavelength.value,
+                    (
+                        observation.delta_wavelength.value
+                        if observation.delta_wavelength is not None
+                        else None
+                    ),
                     name=attr_name,
-                    interpolation="Gaussian",
+                    interpolation=(
+                        "Gaussian" if observation.delta_wavelength is not None else "1d"
+                    ),
                 ),
             )

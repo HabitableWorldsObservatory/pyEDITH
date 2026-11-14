@@ -105,7 +105,7 @@ class Coronagraph(ABC):
 
     This class defines the basic structure and methods common to all coronagraphs.
     Specific coronagraph models should inherit from this class and implement
-    their own `generate_secondary_parameters` method.
+    their own methods.
     Right now, there are two coronagraph sub-classes:
 
         -> **ToyModelCoronagraph**
@@ -151,6 +151,8 @@ class Coronagraph(ABC):
         Number of PSF ratios.
     nrolls : int
         Number of roll angles.
+    coronagraph_spectral_resolution: np.ndarray
+        Spectral resolution of the coronagraph.
     """
 
     # Keys that a user is NOT allowed to override for this coronagraph mode.

@@ -31,6 +31,11 @@ class EACDataAccessError(Exception):
 # TODO: replace with real values once available from eacy/hwome.
 DEFAULT_DQE = 0.75
 
+# A flat, placeholder optics throughput used when no explicit T_optical is given
+# and no EAC engineering configuration is present (i.e. ToyModel / default
+# observatories).
+DEFAULT_OPTICS_THROUGHPUT = 0.532  # From Stark et al. ETC validation
+
 
 class Observatory(ABC):  # abstract class
     """
@@ -1348,11 +1353,20 @@ class Observatory(ABC):  # abstract class
 
         if "T_optical" in parameters.keys():
             logger.info("Calculating optics_throughput from input...")
-            self.optics_throughput = parameters["T_optical"] * DIMENSIONLESS
+            rebinned = utils.resample_to_wavelength_grid(
+                parameters["T_optical"] * DIMENSIONLESS,
+                from_wavelength=parameters["wavelength"],  # input wavelength
+                to_wavelength=mediator.get_observation_parameter("wavelength").value,
+                name="T_optical",
+                interpolation="1d",
+            )  # signal to noise # nlambda array
+
+            self.optics_throughput = rebinned * DIMENSIONLESS
         else:
-            logger.info("Calculating optics throughput from EAC YAML files...")
             eac_config = mediator.get_eac_configuration()
             if eac_config is not None:
+                logger.info("Calculating optics throughput from EAC YAML files...")
+
                 obs_mode = mediator.get_observation_parameter("observing_mode")
                 mode_config = eac_config[obs_mode]
                 active_channel = mediator.get_active_channel()
@@ -1388,8 +1402,18 @@ class Observatory(ABC):  # abstract class
                     np.asarray(rebinned["optics_throughput"]) * DIMENSIONLESS
                 )
             else:
-                raise ValueError(
-                    "Could not calculate optics throughput from the YAML files."
+                # No explicit T_optical and no EAC config: a ToyModel/default
+                # observatory. Use the single documented default throughput
+                logger.info(
+                    "No 'T_optical' and no EAC configuration (ToyModel/default): "
+                    f"using default optics throughput {DEFAULT_OPTICS_THROUGHPUT}."
+                )
+                self.optics_throughput = (
+                    DEFAULT_OPTICS_THROUGHPUT
+                    * DIMENSIONLESS
+                    * np.ones_like(
+                        mediator.get_observation_parameter("wavelength").value
+                    )
                 )
 
         if parameters["observing_mode"] == "IFS":

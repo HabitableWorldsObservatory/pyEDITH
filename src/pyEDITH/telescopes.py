@@ -229,11 +229,6 @@ class EACTelescope(Telescope):
             and telescope specifications
         mediator : ObservatoryMediator
             Mediator object providing access to observation and coronagraph parameters
-
-        Raises
-        ------
-        KeyError
-            If the observing mode is not 'IMAGER' or 'IFS'
         """
         parameters = parse_input.parse_parameters(parameters)
 

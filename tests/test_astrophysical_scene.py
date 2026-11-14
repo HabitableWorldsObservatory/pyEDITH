@@ -1296,3 +1296,68 @@ def test_regrid_spectra_preserves_units():
     assert scene.Fs_over_F0.unit == original_units["Fs_over_F0"]
     assert scene.mag.unit == original_units["mag"]
     assert scene.deltamag.unit == original_units["deltamag"]
+
+
+def test_regrid_spectra_1d_case_imager():
+    """Test regrid_spectra with 1d interpolation for an imager.
+
+    An imaging filter has no spectral dispersion, so it is characterised by a
+    single point at the filter's central wavelength. With only one wavelength
+    and no bandwidth to bin over, observation.delta_wavelength is None, which
+    drives regrid_spectra down the '1d' interpolation branch.
+    """
+    scene = AstrophysicalScene()
+
+    parameters = {
+        "wavelength": np.linspace(0.5, 1.7, 1000),
+    }
+
+    class MockObservation:
+        # Imager: a single sample at the filter central wavelength.
+        wavelength = np.array([1.1]) * WAVELENGTH
+        nlambda = len(wavelength)
+        delta_wavelength = None  # no dispersion -> '1d' branch
+
+    observation = MockObservation()
+
+    # Set up scene with random spectra on the fine input grid
+    scene._input_wavelength = (
+        np.asarray(parameters["wavelength"], dtype=np.float64) * WAVELENGTH
+    )
+
+    scene.F0 = np.random.randn(len(parameters["wavelength"])) * PHOTON_FLUX_DENSITY
+    scene.Fzodi_list = (
+        np.random.randn(len(parameters["wavelength"])) * PHOTON_FLUX_DENSITY
+    )
+    scene.Fexozodi_list = (
+        np.random.randn(len(parameters["wavelength"])) * PHOTON_FLUX_DENSITY
+    )
+    scene.Fbinary_list = (
+        np.random.randn(len(parameters["wavelength"])) * PHOTON_FLUX_DENSITY
+    )
+    scene.Fp_over_Fs = (
+        np.random.randn(len(parameters["wavelength"])) * PHOTON_FLUX_DENSITY
+    )
+    scene.Fs_over_F0 = (
+        np.random.randn(len(parameters["wavelength"])) * PHOTON_FLUX_DENSITY
+    )
+    scene.ez_PPF = 100 * np.ones(len(scene.Fexozodi_list)) * DIMENSIONLESS
+
+    scene.mag = np.random.randn(len(parameters["wavelength"])) * MAGNITUDE
+
+    scene.deltamag = np.random.randn(len(parameters["wavelength"])) * MAGNITUDE
+
+    scene.regrid_spectra(observation)
+
+    # Each spectrum should collapse to the single imager wavelength point
+    assert len(scene.F0) == observation.nlambda
+    assert len(scene.Fzodi_list) == observation.nlambda
+    assert len(scene.Fexozodi_list) == observation.nlambda
+    assert len(scene.Fbinary_list) == observation.nlambda
+    assert len(scene.Fp_over_Fs) == observation.nlambda
+    assert len(scene.Fs_over_F0) == observation.nlambda
+    assert len(scene.mag) == observation.nlambda
+    assert len(scene.deltamag) == observation.nlambda
+
+    # nlambda should be exactly 1 for an imager
+    assert observation.nlambda == 1

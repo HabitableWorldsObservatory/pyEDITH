@@ -129,6 +129,19 @@ def test_wavelength_units():
     assert f.delta_wavelength.unit == u.um
 
 
+def test_filter_contains_bare_float_interpreted_as_wavelength_unit():
+    """A bare (non-Quantity) number passed to contains() is interpreted in the
+    default WAVELENGTH unit (covers the bare-float conversion branch)."""
+    from pyEDITH.filters import Filter
+
+    filt = Filter("F1", low=0.5 * u.um, high=0.7 * u.um, type="IMAGER")
+
+    # Bare floats, no units attached — must be interpreted as WAVELENGTH (um).
+    assert filt.contains(0.6) is True  # inside [0.5, 0.7]
+    assert filt.contains(0.4) is False  # below the band
+    assert filt.contains(0.8) is False  # above the band
+
+
 def test_contains_inside():
     """Test wavelength inside filter bounds."""
     f = Filter("test", low=0.4 * u.um, high=0.8 * u.um, resolution=50)

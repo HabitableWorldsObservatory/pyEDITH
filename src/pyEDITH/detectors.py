@@ -278,8 +278,6 @@ class EACDetector(Detector):
 
         Raises
         ------
-        KeyError
-            If the observing mode is not 'IMAGER' or 'IFS'
         AssertionError
             If the QE array contains NaN values after processing
         """
