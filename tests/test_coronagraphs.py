@@ -855,15 +855,19 @@ def test_coronagraph_yip_load_configuration_imager_missing_aperture_raises_error
 
 
 def test_coronagraph_yip_az_avg_true_uses_core_mean_intensity(
-    yippy_coronagraph, imager_yipcoronagraph_basic_params
+    yippy_coronagraph, imager_yipcoronagraph_basic_params, monkeypatch
 ):
     """az_avg=True must call core_mean_intensity_map (radial projection),
     NOT stellar_intens. Mirror of the az_avg=False test."""
-    yippy_coronagraph.stellar_intens = MagicMock(
-        side_effect=yippy_coronagraph.stellar_intens
-    )
-    yippy_coronagraph.core_mean_intensity_map = MagicMock(
-        side_effect=yippy_coronagraph.core_mean_intensity_map
+    original_stellar_intens = yippy_coronagraph.stellar_intens
+    stellar_intens_tmp = MagicMock(side_effect=original_stellar_intens)
+    stellar_intens_tmp.center_x = original_stellar_intens.center_x
+    stellar_intens_tmp.center_y = original_stellar_intens.center_y
+    monkeypatch.setattr(yippy_coronagraph, "stellar_intens", stellar_intens_tmp)
+    monkeypatch.setattr(
+        yippy_coronagraph,
+        "core_mean_intensity_map",
+        MagicMock(side_effect=yippy_coronagraph.core_mean_intensity_map),
     )
     coronagraph = CoronagraphYIP(yippy_coro=yippy_coronagraph)
     parameters = imager_yipcoronagraph_basic_params.copy()
