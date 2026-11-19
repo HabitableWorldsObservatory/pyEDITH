@@ -20,6 +20,7 @@ dependencies = [
   "astropy",
   "pandas",
   "yippy>=2.10.2,<3",
+  "hwoutils<2",  # yippy 2.x imports APIs that hwoutils 2 removed
   "openpyxl",
   "synphot",
   "eacy",
