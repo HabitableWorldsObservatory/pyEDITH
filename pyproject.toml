@@ -25,6 +25,7 @@ dependencies = [
   "synphot",
   "eacy",
   "hwostyle",
+  "pyyaml",
 ]
 
 # Optional dependencies for testing
